@@ -94,7 +94,7 @@ app.include_router(prices.router, prefix="/api") # /api/prices/latest
 from app.api.routes import industry_groups
 app.include_router(industry_groups.router, prefix="/api/industry-groups", tags=["Industry Groups"])
 app.include_router(technical_screener.router, prefix="/api", dependencies=protected_dependencies)  # Technical Screener
-app.include_router(financial_metrics.router, prefix="/api", tags=["Financial Metrics"], dependencies=protected_dependencies)
+app.include_router(financial_metrics.router, prefix="/api/financial-metrics", tags=["Financial Metrics"])  # /api/financial-metrics/*
 
 # Event handlers
 @app.on_event("startup")

@@ -58,6 +58,20 @@ class Price(Base):
     percent_off_52w_low = Column(Numeric(8, 2))
     vol_diff_50_percent = Column(Numeric(8, 2))
     
+    # New Technical Indicators - 21 Day EMA
+    ema_21 = Column(Numeric(12, 2))
+    
+    # Historical 200MA (for moving average comparisons)
+    sma_200_1m_ago = Column(Numeric(12, 2))
+    sma_200_2m_ago = Column(Numeric(12, 2))
+    sma_200_3m_ago = Column(Numeric(12, 2))
+    sma_200_4m_ago = Column(Numeric(12, 2))
+    sma_200_5m_ago = Column(Numeric(12, 2))
+    
+    # Weekly Moving Averages
+    sma_30w = Column(Numeric(12, 2))
+    sma_40w = Column(Numeric(12, 2))
+    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

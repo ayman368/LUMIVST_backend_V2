@@ -6,3 +6,5 @@ from app.models.rs_daily import RSDaily
 from app.models.scraped_reports import Company, FinancialReport, ExcelReport
 from app.models.stock_indicators import StockIndicator
 from app.models.financial_metrics import CompanyFinancialMetric
+from app.models.financial_metric_categories import FinancialMetricCategory
+from app.models.company_metric_display_settings import CompanyMetricDisplaySetting

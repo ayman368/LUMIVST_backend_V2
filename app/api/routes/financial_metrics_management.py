@@ -1,7 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+"""
+API Routes for Financial Metrics Management
+Handles metric categorization, display settings, and filtering
+"""
+
+from fastapi import APIRouter, HTTPException, Depends, Query
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
-from typing import List, Optional, Dict, Any
+from sqlalchemy import and_, or_
+
 from app.core.database import get_db
 from app.models.financial_metrics import CompanyFinancialMetric
 from app.models.financial_metric_categories import FinancialMetricCategory
@@ -13,70 +19,14 @@ from app.schemas.financial_metrics_management import (
     BulkUpdateDisplaySettingsRequest,
     MetricCategoryWithDisplaySettings,
 )
-from pydantic import BaseModel
 from collections import defaultdict
 
 router = APIRouter()
 
-# ==================== Schema Definitions ====================
-
-class MetricResponse(BaseModel):
-    id: int
-    year: int
-    period: str
-    metric_name: str
-    metric_value: Optional[float]
-    metric_text: Optional[str]
-    label_en: Optional[str]
-    source_file: Optional[str]
-    
-    class Config:
-        from_attributes = True
-
-
-# ==================== Existing Endpoints ====================
-
-@router.get("/compare", response_model=List[Dict[str, Any]])
-def compare_companies(
-    symbols: List[str] = Query(..., description="List of company symbols to compare"),
-    metric_name: str = Query(..., description="Metric key to compare (e.g., net_profit)"),
-    period: Optional[str] = Query('ANNUAL', description="Period to filter (Default: ANNUAL)"),
-    years: Optional[List[int]] = Query(None, description="Specific years to compare"),
-    db: Session = Depends(get_db)
-):
-    """
-    Compare a specific metric across multiple companies.
-    Returns a list of data points suitable for charting or tables.
-    Example: Compare 'net_profit' for [1010, 1120] in 'ANNUAL' reports.
-    """
-    query = db.query(CompanyFinancialMetric).filter(
-        CompanyFinancialMetric.company_symbol.in_(symbols),
-        CompanyFinancialMetric.metric_name == metric_name,
-        CompanyFinancialMetric.period == period
-    )
-    
-    if years:
-        query = query.filter(CompanyFinancialMetric.year.in_(years))
-        
-    results = query.order_by(CompanyFinancialMetric.year).all()
-    
-    # Transform into a structured list
-    comparison_data = []
-    for r in results:
-        comparison_data.append({
-            "symbol": r.company_symbol,
-            "year": r.year,
-            "period": r.period,
-            "value": r.metric_value,
-            "label": r.label_en
-        })
-        
-    return comparison_data
-
 
 # ==================== Metric Categories CRUD ====================
 
-@router.get("/metric-categories", response_model=List[FinancialMetricCategorySchema], tags=["Metric Categories"])
+@router.get("/categories", response_model=List[FinancialMetricCategorySchema])
 def get_metric_categories(
     section: Optional[str] = Query(None),
     db: Session = Depends(get_db)
@@ -95,7 +45,7 @@ def get_metric_categories(
     return categories
 
 
-@router.get("/metric-categories/{metric_name}", response_model=FinancialMetricCategorySchema, tags=["Metric Categories"])
+@router.get("/categories/{metric_name}", response_model=FinancialMetricCategorySchema)
 def get_metric_category(metric_name: str, db: Session = Depends(get_db)):
     """Get a specific metric category by name"""
     category = db.query(FinancialMetricCategory).filter(
@@ -108,7 +58,7 @@ def get_metric_category(metric_name: str, db: Session = Depends(get_db)):
     return category
 
 
-@router.post("/metric-categories", response_model=FinancialMetricCategorySchema, tags=["Metric Categories"])
+@router.post("/categories", response_model=FinancialMetricCategorySchema)
 def create_metric_category(
     category: FinancialMetricCategorySchema,
     db: Session = Depends(get_db)
@@ -130,7 +80,7 @@ def create_metric_category(
     return db_category
 
 
-@router.put("/metric-categories/{metric_name}", response_model=FinancialMetricCategorySchema, tags=["Metric Categories"])
+@router.put("/categories/{metric_name}", response_model=FinancialMetricCategorySchema)
 def update_metric_category(
     metric_name: str,
     category: FinancialMetricCategorySchema,
@@ -157,7 +107,7 @@ def update_metric_category(
 
 # ==================== Display Settings CRUD ====================
 
-@router.get("/metric-settings/{symbol}", response_model=List[MetricCategoryWithDisplaySettings], tags=["Display Settings"])
+@router.get("/settings/{symbol}", response_model=List[MetricCategoryWithDisplaySettings])
 def get_company_metric_settings(
     symbol: str,
     section: Optional[str] = Query(None),
@@ -202,7 +152,7 @@ def get_company_metric_settings(
     return result
 
 
-@router.get("/metric-settings/{symbol}/{metric_name}", response_model=CompanyMetricDisplaySettingSchema, tags=["Display Settings"])
+@router.get("/settings/{symbol}/{metric_name}", response_model=CompanyMetricDisplaySettingSchema)
 def get_company_metric_setting(
     symbol: str,
     metric_name: str,
@@ -227,7 +177,7 @@ def get_company_metric_setting(
     return setting
 
 
-@router.post("/metric-settings/{symbol}/{metric_name}", response_model=CompanyMetricDisplaySettingSchema, tags=["Display Settings"])
+@router.post("/settings/{symbol}/{metric_name}", response_model=CompanyMetricDisplaySettingSchema)
 def create_company_metric_setting(
     symbol: str,
     metric_name: str,
@@ -275,7 +225,7 @@ def create_company_metric_setting(
     return db_setting
 
 
-@router.put("/metric-settings/{symbol}/{metric_name}", response_model=CompanyMetricDisplaySettingSchema, tags=["Display Settings"])
+@router.put("/settings/{symbol}/{metric_name}", response_model=CompanyMetricDisplaySettingSchema)
 def update_company_metric_setting(
     symbol: str,
     metric_name: str,
@@ -304,7 +254,7 @@ def update_company_metric_setting(
     return db_setting
 
 
-@router.delete("/metric-settings/{symbol}/{metric_name}", status_code=204, tags=["Display Settings"])
+@router.delete("/settings/{symbol}/{metric_name}", status_code=204)
 def delete_company_metric_setting(
     symbol: str,
     metric_name: str,
@@ -325,7 +275,7 @@ def delete_company_metric_setting(
     return None
 
 
-@router.post("/metric-settings/{symbol}/bulk-update", response_model=Dict[str, Any], tags=["Display Settings"])
+@router.post("/settings/{symbol}/bulk-update", response_model=Dict[str, Any])
 def bulk_update_display_settings(
     symbol: str,
     request: BulkUpdateDisplaySettingsRequest,
@@ -382,7 +332,7 @@ def bulk_update_display_settings(
 
 # ==================== Financial Data with Display Settings ====================
 
-@router.get("/{symbol}/data-by-section", tags=["Financial Data"])
+@router.get("/{symbol}/data-by-section")
 def get_company_financial_data_by_section(
     symbol: str,
     year: Optional[int] = Query(None),
@@ -396,9 +346,7 @@ def get_company_financial_data_by_section(
     - year: Filter by specific year (optional)
     - period: Filter by specific period - ANNUAL, Q1, Q2, Q3, Q4 (optional)
     """
-    from sqlalchemy.orm import joinedload
-    
-    # Get metrics with JOINs to avoid N+1 queries
+    # Get all metrics for the company
     query = db.query(CompanyFinancialMetric).filter(
         CompanyFinancialMetric.company_symbol == symbol
     )
@@ -417,18 +365,15 @@ def get_company_financial_data_by_section(
     if not metrics:
         return {}
     
-    # Get display settings and categories in one go (only for metrics we have)
-    metric_names = set(m.metric_name for m in metrics)
-    
+    # Get display settings
     settings = db.query(CompanyMetricDisplaySetting).filter(
-        CompanyMetricDisplaySetting.company_symbol == symbol,
-        CompanyMetricDisplaySetting.metric_name.in_(metric_names)
+        CompanyMetricDisplaySetting.company_symbol == symbol
     ).all()
+    
     settings_map = {s.metric_name: s for s in settings}
     
-    categories = db.query(FinancialMetricCategory).filter(
-        FinancialMetricCategory.metric_name.in_(metric_names)
-    ).all()
+    # Get metric categories for section info
+    categories = db.query(FinancialMetricCategory).all()
     categories_map = {c.metric_name: c for c in categories}
     
     # Group by period then by section
@@ -463,7 +408,7 @@ def get_company_financial_data_by_section(
     return output
 
 
-@router.get("/{symbol}/metrics-summary", tags=["Financial Data"])
+@router.get("/{symbol}/summary")
 def get_company_metrics_summary(symbol: str, db: Session = Depends(get_db)):
     """Get summary statistics about company metrics and display settings"""
     # Total metrics

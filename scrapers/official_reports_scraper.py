@@ -56,14 +56,9 @@ class FinancialReportsScraper:
         self.lang = lang
         self.lang_config = LANG_CONFIG[lang]
         
-        # Base URLs for each language
-        self.base_urls = {
-            'en': "https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/!ut/p/z1/04_Sj9CPykssy0xPLMnMz0vMAfIjo8ziTR3NDIw8LAz83d2MXA0C3SydAl1c3Q0NvE30I4EKzBEKDMKcTQzMDPxN3H19LAzdTU31w8syU8v1wwkpK8hOMgUA-oskdg!!/",
-            'ar': "https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/!ut/p/z1/04_Sj9CPykssy0xPLMnMz0vMAfIjo8ziTR3NDIw8LAz83d2MXA0C3SydAl1c3Q0NvE30w1EVGAQHmAIVBPga-xgEGbgbmOlHEaPfAAdwNCCsPwqvEndzdAVYnAhWgMcNXvpR6Tn5SZDwyCgpKbBSNVA1KElMSSwvzVEFujE5P7cgMa8yuDI3KR-oyMjI1EA_ODVPvyA3NMIgMyA3XNdREQCJ_eG4/dz/d5/L0lHSkovd0RNQU5rQUVnQSEhLzROVkUvYXI!/"
-        }
-        
-        base_long_url = self.base_urls.get(lang, self.base_urls['en'])
-        self.base_url = f"{base_long_url}?companySymbol={symbol}"
+        # Both EN and AR use the same base URL — language is controlled by browser locale (en-US / ar-SA)
+        BASE_URL = "https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/!ut/p/z1/04_Sj9CPykssy0xPLMnMz0vMAfIjo8ziTR3NDIw8LAz83d2MXA0C3SydAl1c3Q0NvE30I4EKzBEKDMKcTQzMDPxN3H19LAzdTU31w8syU8v1wwkpK8hOMgUA-oskdg!!/"
+        self.base_url = f"{BASE_URL}?companySymbol={symbol}"
         
         # Download directory - separate by language
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -491,10 +486,17 @@ async def main():
 
     # Process symbols to handle commas (e.g., "2284,2200")
     target_symbols = []
+    invalid_symbols = []
     for item in raw_symbols:
         # Split by comma if present, strip whitespace
         cleaned = [s.strip() for s in item.split(',') if s.strip()]
-        target_symbols.extend(cleaned)
+        for sym in cleaned:
+            if sym.isdigit():
+                target_symbols.append(sym)
+            else:
+                invalid_symbols.append(sym)
+    if invalid_symbols:
+        print(f"⚠️ Warning: Ignored invalid symbols: {invalid_symbols}")
 
     lang = args.lang
 

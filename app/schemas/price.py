@@ -45,6 +45,20 @@ class PriceResponse(BaseModel):
     percent_off_52w_low: Optional[Decimal] = None
     vol_diff_50_percent: Optional[Decimal] = None
     
+    # New Technical Indicators - 21 Day EMA
+    ema_21: Optional[Decimal] = None
+    
+    # Historical 200MA (for moving average comparisons)
+    sma_200_1m_ago: Optional[Decimal] = None
+    sma_200_2m_ago: Optional[Decimal] = None
+    sma_200_3m_ago: Optional[Decimal] = None
+    sma_200_4m_ago: Optional[Decimal] = None
+    sma_200_5m_ago: Optional[Decimal] = None
+    
+    # Weekly Moving Averages
+    sma_30w: Optional[Decimal] = None
+    sma_40w: Optional[Decimal] = None
+    
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
