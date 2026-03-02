@@ -15,7 +15,7 @@ router = APIRouter(prefix="/rs-v2", tags=["Relative Strength V2"])
 class RSV2Item(BaseModel):
     symbol: str
     date: date
-    rs_rating: int
+    rs_rating: Optional[int] = None
     rs_raw: Optional[float] = None
     return_3m: Optional[float] = None
     return_6m: Optional[float] = None
@@ -68,14 +68,14 @@ async def get_latest_rs_v2(
     Get latest RS ratings from the V2 table (new calculation method).
     """
     try:
-        # Get latest date
-        result = db.execute(text("SELECT MAX(date) FROM rs_daily_v2"))
+        # Get latest date - use explicit date casting to handle timestamp/date conversion
+        result = db.execute(text("SELECT COALESCE(MAX(date), CURRENT_DATE)::date as latest_date FROM rs_daily_v2"))
         latest_date = result.scalar()
         
         if not latest_date:
             return RSV2LatestResponse(data=[], total_count=0, date=date.today())
         
-        # Build query
+        # Build query - use CAST() instead of :: to avoid SQLAlchemy parameter binding conflict
         query = """
             SELECT symbol, date, rs_rating, rs_raw, 
                    return_3m, return_6m, return_9m, return_12m,
@@ -83,7 +83,7 @@ async def get_latest_rs_v2(
                    company_name, industry_group,
                    sector_rs_rating, industry_group_rs_rating, industry_rs_rating, sub_industry_rs_rating, acc_dis_rating
             FROM rs_daily_v2
-            WHERE date = :latest_date
+            WHERE CAST(date AS DATE) = CAST(:latest_date AS DATE)
         """
         params = {"latest_date": latest_date}
         
@@ -129,7 +129,7 @@ async def get_latest_rs_v2(
         ) for row in rows]
         
         # Get total count
-        count_query = "SELECT COUNT(*) FROM rs_daily_v2 WHERE date = :latest_date"
+        count_query = "SELECT COUNT(*) FROM rs_daily_v2 WHERE CAST(date AS DATE) = CAST(:latest_date AS DATE)"
         count_result = db.execute(text(count_query), {"latest_date": latest_date})
         total_count = count_result.scalar()
         
