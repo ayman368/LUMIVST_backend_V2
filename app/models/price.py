@@ -58,7 +58,13 @@ class Price(Base):
     percent_off_52w_low = Column(Numeric(8, 2))
     vol_diff_50_percent = Column(Numeric(8, 2))
     
-    # New Technical Indicators - 21 Day EMA
+    # Moving Averages (Daily)
+    sma_10 = Column(Numeric(12, 2))
+    sma_21 = Column(Numeric(12, 2))
+    sma_50 = Column(Numeric(12, 2))
+    sma_150 = Column(Numeric(12, 2))
+    sma_200 = Column(Numeric(12, 2))
+    ema_10 = Column(Numeric(12, 2))
     ema_21 = Column(Numeric(12, 2))
     
     # Historical 200MA (for moving average comparisons)
