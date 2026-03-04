@@ -117,6 +117,8 @@ class StockIndicator(Base):
     
     # ============ 5. TREND SCREENER COMPONENTS ============
     # Price Moving Averages - Daily
+    # NOTE: ema_10, ema_21, sma_50, sma_150, sma_200 are stored in PRICES table with underscore
+    # We JOIN with prices table to get these values
     sma4 = Column(Numeric(10, 2), nullable=True)
     sma9 = Column(Numeric(10, 2), nullable=True)
     sma18 = Column(Numeric(10, 2), nullable=True)
@@ -148,6 +150,22 @@ class StockIndicator(Base):
     sma_trend_weekly = Column(Boolean, default=False)          # ✅ شرط ترتيب المتوسطات أسبوعي
     cci_gt_100 = Column(Boolean, default=False)
     cci_ema20_gt_0_daily = Column(Boolean, default=False)
+    
+    # ============ MA COMPARISON CONDITIONS ============
+    ema10_gt_sma50 = Column(Boolean, default=False)             # ✅ EMA10 > SMA50
+    ema10_gt_sma200 = Column(Boolean, default=False)            # ✅ EMA10 > SMA200
+    ema21_gt_sma50 = Column(Boolean, default=False)             # ✅ EMA21 > SMA50
+    ema21_gt_sma200 = Column(Boolean, default=False)            # ✅ EMA21 > SMA200
+    sma50_gt_sma150 = Column(Boolean, default=False)            # ✅ SMA50 > SMA150
+    sma50_gt_sma200 = Column(Boolean, default=False)            # ✅ SMA50 > SMA200
+    sma150_gt_sma200 = Column(Boolean, default=False)           # ✅ SMA150 > SMA200
+    
+    # ============ SMA200 TREND CONDITIONS ============
+    sma200_gt_sma200_1m_ago = Column(Boolean, default=False)    # ✅ SMA200 > SMA200 من شهر 1 مضى
+    sma200_gt_sma200_2m_ago = Column(Boolean, default=False)    # ✅ SMA200 > SMA200 من شهر 2 مضى
+    sma200_gt_sma200_3m_ago = Column(Boolean, default=False)    # ✅ SMA200 > SMA200 من شهر 3 مضى
+    sma200_gt_sma200_4m_ago = Column(Boolean, default=False)    # ✅ SMA200 > SMA200 من شهر 4 مضى
+    sma200_gt_sma200_5m_ago = Column(Boolean, default=False)    # ✅ SMA200 > SMA200 من شهر 5 مضى
     cci_ema20_gt_0_weekly = Column(Boolean, default=False)     # ✅ شرط CCI EMA20 > 0 أسبوعي
     aroon_up_gt_70 = Column(Boolean, default=False)
     aroon_down_lt_30 = Column(Boolean, default=False)

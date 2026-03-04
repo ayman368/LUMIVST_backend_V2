@@ -6,6 +6,7 @@ from datetime import date
 
 from app.core.database import get_db
 from app.models.stock_indicators import StockIndicator
+from app.models.price import Price
 
 router = APIRouter()
 
@@ -21,12 +22,17 @@ def get_technical_screener_data(
     target_date: Optional[str] = Query(None, description="Filter by specific date (YYYY-MM-DD). Defaults to latest date.")
 ):
     """
-    Returns technical screener rows with optional filtering.
+    Returns technical screener rows with optional filtering + MA values from prices table.
     Endpoint path matches frontend: `/api/technical-screener/screener`.
     By default returns ONLY the latest date's data.
-    Returns JSON: { data: [...], total: N, date: "YYYY-MM-DD" }
+    
+    JOIN with prices table to get: ema_10, ema_21, sma_50, sma_150, sma_200
     """
-    query = db.query(StockIndicator)
+    # Start with JOIN: stock_indicators + prices
+    query = db.query(StockIndicator, Price).join(
+        Price,
+        (StockIndicator.symbol == Price.symbol) & (StockIndicator.date == Price.date)
+    )
 
     # Determine target date: explicit param > latest in DB
     result_date = None
@@ -56,13 +62,13 @@ def get_technical_screener_data(
     results = query.offset(offset).limit(limit).all()
 
     return {
-        'data': [indicator_to_dict(ind) for ind in results],
+        'data': [indicator_to_dict_with_prices(ind, price) for ind, price in results],
         'total': total,
         'date': result_date
     }
 
-def indicator_to_dict(ind: StockIndicator) -> dict:
-    """✅ تحويل جميع المؤشرات إلى Dictionary - نسخة كاملة شاملة جداً"""
+def indicator_to_dict_with_prices(ind: StockIndicator, price: Price) -> dict:
+    """✅ تحويل المؤشرات + البيانات من prices - مع MA values من prices table"""
     
     def safe_float(value):
         return float(value) if value is not None else None
@@ -73,13 +79,21 @@ def indicator_to_dict(ind: StockIndicator) -> dict:
     def safe_bool(value):
         return bool(value) if value is not None else False
     
-    return {
+    # Build base dict from indicator_to_dict
+    result = {
         # ============ Basic Info ============
         'id': ind.id,
         'symbol': ind.symbol,
         'company_name': ind.company_name,
         'date': str(ind.date) if ind.date else None,
         'close': safe_float(ind.close),
+        
+        # ============ MA VALUES FROM PRICES TABLE (with underscore) ============
+        'ema_10': safe_float(price.ema_10) if price else None,
+        'ema_21': safe_float(price.ema_21) if price else None,
+        'sma_50': safe_float(price.sma_50) if price else None,
+        'sma_150': safe_float(price.sma_150) if price else None,
+        'sma_200': safe_float(price.sma_200) if price else None,
         
         # ============ DAILY: RSI Components ============
         'rsi_14': safe_float(ind.rsi_14),
@@ -205,9 +219,29 @@ def indicator_to_dict(ind: StockIndicator) -> dict:
         'is_etf_or_index': safe_bool(ind.is_etf_or_index),
         'has_gap': safe_bool(ind.has_gap),
         'trend_signal': safe_bool(ind.trend_signal),
+        
+        # ============ MA COMPARISON CONDITIONS ============
+        'ema10_gt_sma50': safe_bool(ind.ema10_gt_sma50),
+        'ema10_gt_sma200': safe_bool(ind.ema10_gt_sma200),
+        'ema21_gt_sma50': safe_bool(ind.ema21_gt_sma50),
+        'ema21_gt_sma200': safe_bool(ind.ema21_gt_sma200),
+        'sma50_gt_sma150': safe_bool(ind.sma50_gt_sma150),
+        'sma50_gt_sma200': safe_bool(ind.sma50_gt_sma200),
+        'sma150_gt_sma200': safe_bool(ind.sma150_gt_sma200),
+        
+        # ============ SMA200 TREND CONDITIONS ============
+        'sma200_gt_sma200_1m_ago': safe_bool(ind.sma200_gt_sma200_1m_ago),
+        'sma200_gt_sma200_2m_ago': safe_bool(ind.sma200_gt_sma200_2m_ago),
+        'sma200_gt_sma200_3m_ago': safe_bool(ind.sma200_gt_sma200_3m_ago),
+        'sma200_gt_sma200_4m_ago': safe_bool(ind.sma200_gt_sma200_4m_ago),
+        'sma200_gt_sma200_5m_ago': safe_bool(ind.sma200_gt_sma200_5m_ago),
+        
+        # ============ Screener Results ============
         'stamp_daily': safe_bool(ind.stamp_daily),
         'stamp_weekly': safe_bool(ind.stamp_weekly),
         'stamp': safe_bool(ind.stamp),
         'final_signal': safe_bool(ind.final_signal),
         'score': safe_int(ind.score),
     }
+    
+    return result

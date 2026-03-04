@@ -557,7 +557,8 @@ class IndicatorsDataService:
             'cfg_ema45_gt_50': current_stamp['cfg_ema45'] is not None and current_stamp['cfg_ema45'] > 50 if current_stamp['cfg_ema45'] is not None else False,
             'cfg_ema20_gt_50': current_stamp['cfg_ema20'] is not None and current_stamp['cfg_ema20'] > 50 if current_stamp['cfg_ema20'] is not None else False,
             
-            # ===== 5. Trend Screener =====
+            # ===== 5. Trend Screener (NOTE: ema_10, ema_21, sma_50, sma_150, sma_200 are stored in prices table) =====
+            # No longer storing in stock_indicators - they are queried from prices table via JOIN in API
             'sma4': current_trend['sma4'],
             'sma9': current_trend['sma9'],
             'sma18': current_trend['sma18'],
@@ -580,6 +581,22 @@ class IndicatorsDataService:
             'is_etf_or_index': trend_conditions['is_etf_or_index'],
             'has_gap': trend_conditions['has_gap'],
             'trend_signal': trend_conditions['trend_signal'],
+            
+            # ✅ MA COMPARISON CONDITIONS
+            'ema10_gt_sma50': trend_conditions.get('ema10_gt_sma50', False),
+            'ema10_gt_sma200': trend_conditions.get('ema10_gt_sma200', False),
+            'ema21_gt_sma50': trend_conditions.get('ema21_gt_sma50', False),
+            'ema21_gt_sma200': trend_conditions.get('ema21_gt_sma200', False),
+            'sma50_gt_sma150': trend_conditions.get('sma50_gt_sma150', False),
+            'sma50_gt_sma200': trend_conditions.get('sma50_gt_sma200', False),
+            'sma150_gt_sma200': trend_conditions.get('sma150_gt_sma200', False),
+            
+            # ✅ 200SMA TREND CONDITIONS
+            'sma200_gt_sma200_1m_ago': trend_conditions.get('sma200_gt_sma200_1m_ago', False),
+            'sma200_gt_sma200_2m_ago': trend_conditions.get('sma200_gt_sma200_2m_ago', False),
+            'sma200_gt_sma200_3m_ago': trend_conditions.get('sma200_gt_sma200_3m_ago', False),
+            'sma200_gt_sma200_4m_ago': trend_conditions.get('sma200_gt_sma200_4m_ago', False),
+            'sma200_gt_sma200_5m_ago': trend_conditions.get('sma200_gt_sma200_5m_ago', False),
             
             # ===== 6. Weekly Values =====
             # RSI Weekly

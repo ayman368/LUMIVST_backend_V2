@@ -54,7 +54,7 @@ class RSV2StatsResponse(BaseModel):
 
 
 @router.get("/latest", response_model=RSV2LatestResponse)
-@limiter.limit("30/minute")
+@limiter.limit("200/minute")
 async def get_latest_rs_v2(
     request: Request,
     min_rs: Optional[int] = Query(None, ge=0, le=99, description="Minimum RS Rating"),
@@ -142,7 +142,7 @@ async def get_latest_rs_v2(
 
 
 @router.get("/history/{symbol}")
-@limiter.limit("30/minute")
+@limiter.limit("60/minute")
 async def get_rs_history_v2(
     request: Request,
     symbol: str,
@@ -205,7 +205,7 @@ async def get_rs_history_v2(
 
 
 @router.get("/stats", response_model=RSV2StatsResponse)
-@limiter.limit("30/minute")
+@limiter.limit("60/minute")
 async def get_rs_stats_v2(
     request: Request,
     db: Session = Depends(get_db)

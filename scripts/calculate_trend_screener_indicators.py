@@ -128,10 +128,17 @@ def calculate_price_moving_averages(closes: List[float]) -> Dict[str, Any]:
     حساب جميع المتوسطات المتحركة للسعر
     """
     return {
+        # Short Term
+        'ema10': calculate_ema(closes, 10),      # ✅ EMA10
+        'ema21': calculate_ema(closes, 21),      # ✅ EMA21
         'sma4': calculate_sma(closes, 4),
         'sma9': calculate_sma(closes, 9),
         'sma18': calculate_sma(closes, 18),
-        'wma45': calculate_wma(closes, 45),  # ✅ WMA صحيحة
+        'wma45': calculate_wma(closes, 45),      # ✅ WMA صحيحة
+        # Medium & Long Term
+        'sma50': calculate_sma(closes, 50),      # ✅ SMA50
+        'sma150': calculate_sma(closes, 150),    # ✅ SMA150
+        'sma200': calculate_sma(closes, 200),    # ✅ SMA200
     }
 
 
@@ -161,6 +168,11 @@ def calculate_trend_components(highs: List[float], lows: List[float], closes: Li
     
     return {
         # Daily Moving Averages
+        'ema10': price_mas['ema10'],           # ✅ EMA10
+        'ema21': price_mas['ema21'],           # ✅ EMA21
+        'sma50': price_mas['sma50'],           # ✅ SMA50
+        'sma150': price_mas['sma150'],         # ✅ SMA150
+        'sma200': price_mas['sma200'],         # ✅ SMA200
         'sma4': price_mas['sma4'],
         'sma9': price_mas['sma9'],
         'sma18': price_mas['sma18'],
@@ -337,6 +349,49 @@ def calculate_trend_conditions(
     # تطبيق الفلاتر
     trend_signal = valid_signal and not is_etf_or_index and not has_gap
     
+    # ============ MA COMPARISON CONDITIONS ============
+    # الحصول على قيم MA في الموضع الحالي
+    ema10_val = get_val(daily_components.get('ema10', []), idx)
+    ema21_val = get_val(daily_components.get('ema21', []), idx)
+    sma50_val = get_val(daily_components.get('sma50', []), idx)
+    sma150_val = get_val(daily_components.get('sma150', []), idx)
+    sma200_val = get_val(daily_components.get('sma200', []), idx)
+    
+    # MA Comparisons
+    ema10_gt_sma50 = ema10_val is not None and sma50_val is not None and ema10_val > sma50_val
+    ema10_gt_sma200 = ema10_val is not None and sma200_val is not None and ema10_val > sma200_val
+    ema21_gt_sma50 = ema21_val is not None and sma50_val is not None and ema21_val > sma50_val
+    ema21_gt_sma200 = ema21_val is not None and sma200_val is not None and ema21_val > sma200_val
+    sma50_gt_sma150 = sma50_val is not None and sma150_val is not None and sma50_val > sma150_val
+    sma50_gt_sma200 = sma50_val is not None and sma200_val is not None and sma50_val > sma200_val
+    sma150_gt_sma200 = sma150_val is not None and sma200_val is not None and sma150_val > sma200_val
+    
+    # ============ 200SMA TREND CONDITIONS (مقارنة مع الأشهر السابقة) ============
+    sma200_gt_sma200_1m_ago = False
+    sma200_gt_sma200_2m_ago = False
+    sma200_gt_sma200_3m_ago = False
+    sma200_gt_sma200_4m_ago = False
+    sma200_gt_sma200_5m_ago = False
+    
+    if sma200_val is not None:
+        sma200_array = daily_components.get('sma200', [])
+        # كل شهر ≈ 21 يوم
+        if idx >= 21:
+            sma200_1m = get_val(sma200_array, idx - 21)
+            sma200_gt_sma200_1m_ago = sma200_1m is not None and sma200_val > sma200_1m
+        if idx >= 42:
+            sma200_2m = get_val(sma200_array, idx - 42)
+            sma200_gt_sma200_2m_ago = sma200_2m is not None and sma200_val > sma200_2m
+        if idx >= 63:
+            sma200_3m = get_val(sma200_array, idx - 63)
+            sma200_gt_sma200_3m_ago = sma200_3m is not None and sma200_val > sma200_3m
+        if idx >= 84:
+            sma200_4m = get_val(sma200_array, idx - 84)
+            sma200_gt_sma200_4m_ago = sma200_4m is not None and sma200_val > sma200_4m
+        if idx >= 105:
+            sma200_5m = get_val(sma200_array, idx - 105)
+            sma200_gt_sma200_5m_ago = sma200_5m is not None and sma200_val > sma200_5m
+    
     return {
         # الشروط الأساسية
         'price_gt_sma18': price_gt_sma18,
@@ -348,6 +403,22 @@ def calculate_trend_conditions(
         'cci_ema20_gt_0_weekly': cci_ema20_gt_0_weekly,
         'aroon_up_gt_70': aroon_up_gt_70,
         'aroon_down_lt_30': aroon_down_lt_30,
+        
+        # ✅ MA COMPARISON CONDITIONS
+        'ema10_gt_sma50': ema10_gt_sma50,
+        'ema10_gt_sma200': ema10_gt_sma200,
+        'ema21_gt_sma50': ema21_gt_sma50,
+        'ema21_gt_sma200': ema21_gt_sma200,
+        'sma50_gt_sma150': sma50_gt_sma150,
+        'sma50_gt_sma200': sma50_gt_sma200,
+        'sma150_gt_sma200': sma150_gt_sma200,
+        
+        # ✅ 200SMA TREND CONDITIONS
+        'sma200_gt_sma200_1m_ago': sma200_gt_sma200_1m_ago,
+        'sma200_gt_sma200_2m_ago': sma200_gt_sma200_2m_ago,
+        'sma200_gt_sma200_3m_ago': sma200_gt_sma200_3m_ago,
+        'sma200_gt_sma200_4m_ago': sma200_gt_sma200_4m_ago,
+        'sma200_gt_sma200_5m_ago': sma200_gt_sma200_5m_ago,
         
         # الفلاتر
         'is_etf_or_index': is_etf_or_index,
@@ -377,6 +448,11 @@ def get_trend_current_values(
     """
     return {
         # Daily values
+        'ema10': get_val(daily_components.get('ema10', []), idx),      # ✅ EMA10
+        'ema21': get_val(daily_components.get('ema21', []), idx),      # ✅ EMA21
+        'sma50': get_val(daily_components.get('sma50', []), idx),      # ✅ SMA50
+        'sma150': get_val(daily_components.get('sma150', []), idx),    # ✅ SMA150
+        'sma200': get_val(daily_components.get('sma200', []), idx),    # ✅ SMA200
         'sma4': get_val(daily_components.get('sma4', []), idx),
         'sma9': get_val(daily_components.get('sma9', []), idx),
         'sma18': get_val(daily_components.get('sma18', []), idx),
