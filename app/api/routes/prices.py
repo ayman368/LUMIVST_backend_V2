@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, asc
 from typing import List, Optional
 from datetime import date
 
@@ -12,6 +12,115 @@ router = APIRouter(prefix="/prices", tags=["Prices"])
 
 import csv
 from pathlib import Path
+
+
+@router.get("/history/{symbol}")
+async def get_price_history(
+    symbol: str,
+    db: Session = Depends(get_db),
+    limit: int = Query(500, le=2000),
+):
+    """
+    Get historical OHLCV + all oscillator data for a symbol.
+    JOINs prices with stock_indicators so RSI, CCI, CFG, THE.NUMBER, STAMP are all included.
+    """
+    try:
+        from app.models.stock_indicators import StockIndicator
+
+        results = (
+            db.query(Price, StockIndicator)
+            .outerjoin(
+                StockIndicator,
+                (Price.symbol == StockIndicator.symbol) & (Price.date == StockIndicator.date)
+            )
+            .filter(Price.symbol == symbol)
+            .order_by(asc(Price.date))
+            .limit(limit)
+            .all()
+        )
+
+        if not results:
+            raise HTTPException(status_code=404, detail=f"No price history found for symbol {symbol}")
+
+        def f(val):
+            return float(val) if val is not None else None
+
+        data = []
+        for price, ind in results:
+            data.append({
+                "time":   price.date.isoformat(),
+                "open":   f(price.open),
+                "high":   f(price.high),
+                "low":    f(price.low),
+                "close":  f(price.close),
+                "volume": int(price.volume_traded) if price.volume_traded is not None else 0,
+                # Price MAs (prices table)
+                "sma_10":  f(price.sma_10),
+                "sma_21":  f(price.sma_21),
+                "sma_50":  f(price.sma_50),
+                "sma_150": f(price.sma_150),
+                "sma_200": f(price.sma_200),
+                "ema_10":  f(price.ema_10),
+                "ema_21":  f(price.ema_21),
+                # RSI Daily
+                "rsi_14":    f(ind.rsi_14)    if ind else None,
+                "sma9_rsi":  f(ind.sma9_rsi)  if ind else None,
+                "wma45_rsi": f(ind.wma45_rsi) if ind else None,
+                # RSI Weekly
+                "rsi_w":       f(ind.rsi_w)       if ind else None,
+                "sma9_rsi_w":  f(ind.sma9_rsi_w)  if ind else None,
+                "wma45_rsi_w": f(ind.wma45_rsi_w) if ind else None,
+                # CCI Daily
+                "cci":       f(ind.cci)       if ind else None,
+                "cci_ema20": f(ind.cci_ema20) if ind else None,
+                # CCI Weekly
+                "cci_w":       f(ind.cci_w)       if ind else None,
+                "cci_ema20_w": f(ind.cci_ema20_w) if ind else None,
+                # CFG Daily
+                "cfg":       f(ind.cfg_daily) if ind else None,
+                "cfg_sma4":  f(ind.cfg_sma4)  if ind else None,
+                "cfg_ema45": f(ind.cfg_ema45) if ind else None,
+                # CFG Weekly
+                "cfg_w":       f(ind.cfg_w)       if ind else None,
+                "cfg_sma4_w":  f(ind.cfg_sma4_w)  if ind else None,
+                "cfg_ema45_w": f(ind.cfg_ema45_w) if ind else None,
+                # THE.NUMBER Daily
+                "the_number":    f(ind.the_number)    if ind else None,
+                "the_number_hl": f(ind.the_number_hl) if ind else None,
+                "the_number_ll": f(ind.the_number_ll) if ind else None,
+                # THE.NUMBER Weekly
+                "the_number_w":    f(ind.the_number_w)    if ind else None,
+                "the_number_hl_w": f(ind.the_number_hl_w) if ind else None,
+                "the_number_ll_w": f(ind.the_number_ll_w) if ind else None,
+                # STAMP Daily
+                "stamp_s9rsi":   f(ind.stamp_s9rsi)   if ind else None,
+                "stamp_e45cfg":  f(ind.stamp_e45cfg)  if ind else None,
+                "stamp_e45rsi":  f(ind.stamp_e45rsi)  if ind else None,
+                "stamp_e20sma3": f(ind.stamp_e20sma3) if ind else None,
+                # STAMP Weekly
+                "stamp_s9rsi_w":  f(ind.stamp_s9rsi_w)  if ind else None,
+                "stamp_e45cfg_w": f(ind.stamp_e45cfg_w) if ind else None,
+                "stamp_e45rsi_w": f(ind.stamp_e45rsi_w) if ind else None,
+                # Price MAs (indicators table)
+                "sma4":  f(ind.sma4)  if ind else None,
+                "sma9":  f(ind.sma9)  if ind else None,
+                "sma18": f(ind.sma18) if ind else None,
+                # Weekly price MAs
+                "sma4_w":  f(ind.sma4_w)  if ind else None,
+                "sma9_w":  f(ind.sma9_w)  if ind else None,
+                "sma18_w": f(ind.sma18_w) if ind else None,
+                # Aroon
+                "aroon_up":   f(ind.aroon_up)   if ind else None,
+                "aroon_down": f(ind.aroon_down) if ind else None,
+            })
+
+        return {"symbol": symbol, "count": len(data), "data": data}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching price history for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/latest", response_model=LatestPricesResponse)
 async def get_latest_prices(

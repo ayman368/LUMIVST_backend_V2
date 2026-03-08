@@ -227,14 +227,14 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
                 **data
             }
             
-            # تنظيف البيانات (تحويل numpy types إلى Python types)
+            # تنظيف البيانات (تحويل numpy types إلى Python types وتقريب الأرقام لخانين لتطابق TradingView)
             for k, v in indicator_data.items():
                 if isinstance(v, (np.float64, np.float32, np.integer)):
-                    indicator_data[k] = float(v) if not pd.isna(v) else None
+                    indicator_data[k] = round(float(v), 2) if not pd.isna(v) else None
                 elif isinstance(v, np.bool_):
                     indicator_data[k] = bool(v)
-                elif isinstance(v, float) and pd.isna(v):
-                    indicator_data[k] = None
+                elif isinstance(v, float):
+                    indicator_data[k] = round(v, 2) if not pd.isna(v) else None
                 elif isinstance(v, (list, dict, np.ndarray, pd.Series)):
                     indicator_data[k] = None  # لا نخزن القوائم في قاعدة البيانات
             

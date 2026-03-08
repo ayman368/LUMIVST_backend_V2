@@ -110,11 +110,32 @@ def calculate_wma(values: List[float], period: int) -> List[Optional[float]]:
 
 def calculate_ema(values: List[float], period: int) -> List[Optional[float]]:
     """Exponential Moving Average"""
-    if not values or len(values) < period:
-        return [None] * len(values) if values else []
-    s = pd.Series(values)
-    ema = s.ewm(span=period, min_periods=period, adjust=False).mean()
-    return [float(x) if not pd.isna(x) else None for x in ema.tolist()]
+    alpha = 2.0 / (period + 1.0)
+    ema_vals = []
+    
+    vals = [v if v is not None and not pd.isna(v) else np.nan for v in values]
+    ema_prev = np.nan
+    
+    for i in range(len(vals)):
+        # لا يمكن الحساب إذا كانت القيمة الحالية NaN
+        if np.isnan(vals[i]):
+            ema_vals.append(None)
+            continue
+            
+        if np.isnan(ema_prev):
+            # TradingView يبدأ حساب EMA باستخدام SMA كأول نقطة أساس عندما تكتمل فترة period
+            # نتحقق من النافذة السابقة
+            window = vals[max(0, i - period + 1) : i + 1]
+            if len(window) == period and not np.any(np.isnan(window)):
+                ema_prev = np.mean(window)
+                ema_vals.append(float(ema_prev))
+            else:
+                ema_vals.append(None)
+        else:
+            ema_prev = alpha * vals[i] + (1 - alpha) * ema_prev
+            ema_vals.append(float(ema_prev))
+            
+    return ema_vals
 
 
 def calculate_rsi_components(closes: List[float]) -> Dict[str, Any]:

@@ -61,9 +61,9 @@ class TechnicalCalculator:
                     logger.warning(f"⚠️ تحذير: {col_name}: {e}")
 
     def load_data(self):
-        # سحب كل الأعمدة اللازمة للحسابات بما فيها الـ high والـ low
+        # سحب كل الأعمدة اللازمة للحسابات بما فيها الـ high والـ low و open
         query = """
-        SELECT id, symbol, date, close, high, low, volume_traded
+        SELECT id, symbol, date, open, close, high, low, volume_traded
         FROM prices
         ORDER BY symbol, date
         """
@@ -79,6 +79,13 @@ class TechnicalCalculator:
         
         # ترتيب البيانات لضمان دقة العمليات الحسابية المتسلسلة
         df = df.sort_values(['symbol', 'date'])
+        
+        # فلترة أيام العطلات (التي ينسخ فيها مزود البيانات اليوم السابق بالظبط)
+        # لتتطابق المؤشرات مثل SMA و 52 Week High مع TradingView
+        columns_to_check = ['open', 'high', 'low', 'close']
+        mask = (df[columns_to_check] != df.groupby('symbol')[columns_to_check].shift(1)).any(axis=1) | (df.groupby('symbol')['date'].cumcount() == 0)
+        df = df[mask].copy()
+        
         grouped = df.groupby('symbol')
 
         # 1. حساب قيم المتوسطات المتحركة (SMA) مباشرة
@@ -86,11 +93,11 @@ class TechnicalCalculator:
         for window in [10, 21, 50, 150, 200]:
             df[f'sma_{window}'] = grouped['close'].transform(lambda x: x.rolling(window=window).mean())
 
-        # 2. حساب الـ 52 Week High من عمود الـ High (أعلى سعر وصل له السهم)
-        df['fifty_two_week_high'] = grouped['high'].transform(lambda x: x.rolling(window=252).max())
+        # 2. حساب الـ 52 Week High من عمود الـ High (أعلى سعر وصل له السهم - 260 يوم)
+        df['fifty_two_week_high'] = grouped['high'].transform(lambda x: x.rolling(window=260).max())
 
-        # 3. حساب الـ 52 Week Low من عمود الـ Low (أقل سعر وصل له السهم)
-        df['fifty_two_week_low'] = grouped['low'].transform(lambda x: x.rolling(window=252).min())
+        # 3. حساب الـ 52 Week Low من عمود الـ Low (أقل سعر وصل له السهم - 260 يوم)
+        df['fifty_two_week_low'] = grouped['low'].transform(lambda x: x.rolling(window=260).min())
 
         # 4. حساب متوسط حجم التداول لـ 50 يوم (Average Volume)
         df['average_volume_50'] = grouped['volume_traded'].transform(lambda x: x.rolling(window=50).mean())
@@ -240,6 +247,11 @@ class TechnicalCalculator:
             col_sma = f'sma_{window}'
             df[f'price_vs_sma_{window}_percent'] = ((df['close'] - df[col_sma]) / df[col_sma].replace(0, np.nan)) * 100
         
+        # نسبة ابتعاد السعر عن EMAs
+        for window in [10, 21]:
+            col_ema = f'ema_{window}'
+            df[f'price_vs_ema_{window}_percent'] = ((df['close'] - df[col_ema]) / df[col_ema].replace(0, np.nan)) * 100
+        
         # نسبة الابتعاد عن القمة والقاع السنوي
         df['percent_off_52w_high'] = ((df['close'] - df['fifty_two_week_high'].replace(0, np.nan)) / df['fifty_two_week_high'].replace(0, np.nan)) * 100
         df['percent_off_52w_low'] = ((df['close'] - df['fifty_two_week_low'].replace(0, np.nan)) / df['fifty_two_week_low'].replace(0, np.nan)) * 100
@@ -247,25 +259,8 @@ class TechnicalCalculator:
         # نسبة تغير حجم التداول عن المتوسط
         df['vol_diff_50_percent'] = ((df['volume_traded'] - df['average_volume_50']) / df['average_volume_50'].replace(0, np.nan)) * 100
 
-        # تنظيف البيانات وتقريبها
+        # تنظيف البيانات (بدون تقريب - احتفظ بالدقة الكاملة)
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        
-        cols_to_round = [
-            'sma_10', 'sma_21', 'sma_50', 'sma_150', 'sma_200', 
-            'sma_4', 'sma_9', 'sma_18',
-            'sma_4w', 'sma_9w', 'sma_18w',
-            'fifty_two_week_high', 'fifty_two_week_low',
-            'price_vs_sma_10_percent', 'price_vs_sma_21_percent', 'price_vs_sma_50_percent',
-            'price_vs_sma_150_percent', 'price_vs_sma_200_percent',
-            'percent_off_52w_high', 'percent_off_52w_low', 'vol_diff_50_percent',
-            'ema_21', 'ema_10', 'sma_3', 'ema_20_sma3',
-            'sma_200_1m_ago', 'sma_200_2m_ago', 'sma_200_3m_ago', 'sma_200_4m_ago', 'sma_200_5m_ago',
-            'sma_30w', 'sma_40w',
-            'cci_14', 'cci_ema_20', 'aroon_up', 'aroon_down'
-        ]
-        
-        for col in cols_to_round:
-            df[col] = df[col].round(2)
 
         return df
 
@@ -298,6 +293,8 @@ class TechnicalCalculator:
                             price_vs_sma_50_percent = :p50_pct,
                             price_vs_sma_150_percent = :p150_pct,
                             price_vs_sma_200_percent = :p200_pct,
+                            price_vs_ema_10_percent = :p10_ema_pct,
+                            price_vs_ema_21_percent = :p21_ema_pct,
                             percent_off_52w_high = :pct_off_high,
                             percent_off_52w_low = :pct_off_low,
                             vol_diff_50_percent = :vol_diff_pct,
@@ -340,6 +337,8 @@ class TechnicalCalculator:
                         'p50_pct': row['price_vs_sma_50_percent'] if pd.notnull(row['price_vs_sma_50_percent']) else None,
                         'p150_pct': row['price_vs_sma_150_percent'] if pd.notnull(row['price_vs_sma_150_percent']) else None,
                         'p200_pct': row['price_vs_sma_200_percent'] if pd.notnull(row['price_vs_sma_200_percent']) else None,
+                        'p10_ema_pct': row['price_vs_ema_10_percent'] if pd.notnull(row['price_vs_ema_10_percent']) else None,
+                        'p21_ema_pct': row['price_vs_ema_21_percent'] if pd.notnull(row['price_vs_ema_21_percent']) else None,
                         'pct_off_high': row['percent_off_52w_high'] if pd.notnull(row['percent_off_52w_high']) else None,
                         'pct_off_low': row['percent_off_52w_low'] if pd.notnull(row['percent_off_52w_low']) else None,
                         'vol_diff_pct': row['vol_diff_50_percent'] if pd.notnull(row['vol_diff_50_percent']) else None,

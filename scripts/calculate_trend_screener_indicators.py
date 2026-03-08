@@ -82,38 +82,33 @@ def calculate_aroon_pinescript_exact(highs: List[float], lows: List[float], peri
     aroon_down = []
     
     for i in range(len(highs_arr)):
-        if i < period - 1:
+        # Aroon window needs to be 'period + 1' elements to reach exactly 'period' bars back
+        if i < period:
             aroon_up.append(None)
             aroon_down.append(None)
             continue
         
-        # Get window of last 'period' bars
-        window_high = highs_arr[i-period+1:i+1]
-        window_low = lows_arr[i-period+1:i+1]
+        # Window of period + 1 bars (e.g. 26 bars for period 25, indices i-period to i)
+        window_high = highs_arr[i - period: i + 1]
+        window_low  = lows_arr[i - period: i + 1]
         
-        # Skip if any NaN in window
         if np.any(np.isnan(window_high)) or np.any(np.isnan(window_low)):
             aroon_up.append(None)
             aroon_down.append(None)
             continue
         
-        # Find days since highest high
-        # barssince = bars since FIRST occurrence in the window
+        # Aroon Up: Find offset of HIGHEST high. If tie, take the MOST RECENT (rightmost)
         max_val = np.max(window_high)
-        # Find FIRST index where value equals max (from left)
         max_indices = np.where(window_high == max_val)[0]
-        first_occurrence = max_indices[0] if len(max_indices) > 0 else 0
-        days_since_high = len(window_high) - 1 - first_occurrence
+        recent_occurrence = max_indices[-1]  # rightmost index
+        days_since_high = (len(window_high) - 1) - recent_occurrence
         
-        # Find days since lowest low
-        # Same: use FIRST occurrence
+        # Aroon Down: Find offset of LOWEST low. If tie, take the MOST RECENT (rightmost)
         min_val = np.min(window_low)
-        # Find FIRST index where value equals min (from left)
         min_indices = np.where(window_low == min_val)[0]
-        first_occurrence_low = min_indices[0] if len(min_indices) > 0 else 0
-        days_since_low = len(window_low) - 1 - first_occurrence_low
+        recent_occurrence_low = min_indices[-1]
+        days_since_low = (len(window_low) - 1) - recent_occurrence_low
         
-        # Calculate Aroon values
         aroon_up_val = 100.0 * (period - days_since_high) / period
         aroon_down_val = 100.0 * (period - days_since_low) / period
         

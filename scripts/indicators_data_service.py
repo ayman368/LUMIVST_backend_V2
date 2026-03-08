@@ -52,9 +52,13 @@ class IndicatorsDataService:
         df['close'] = df['close'].apply(convert_to_float)
         df.dropna(subset=['close'], inplace=True)
         df.set_index('date', inplace=True)
-        # Round close to 1 decimal to match TradingView display (closest tenth)
-        df['close'] = df['close'].apply(lambda x: round(x, 1) if not pd.isna(x) else x)
         df.sort_index(inplace=True)
+        
+        # فلترة أيام العطلات (عندما يكرر مزود البيانات نفس الشمعة السابقة تماماً)
+        # هذا ضروري جداً لتطابق المؤشرات مع TradingView
+        columns_to_check = ['open', 'high', 'low', 'close']
+        mask = (df[columns_to_check] != df[columns_to_check].shift(1)).any(axis=1)
+        df = df[mask]
         
         return df if len(df) >= 100 else None
     
@@ -74,9 +78,6 @@ class IndicatorsDataService:
         
         if len(df_weekly) < 20:
             return None
-
-        # Round weekly close to 1 decimal (TradingView's weekly close rounding)
-        df_weekly['close'] = df_weekly['close'].apply(lambda x: round(x, 1) if not pd.isna(x) else x)
         # expose weekly close with '_w' suffix so merged dataframe contains it
         df_weekly['close_w'] = df_weekly['close']
         
