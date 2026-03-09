@@ -78,6 +78,11 @@ class IndicatorsDataService:
         
         if len(df_weekly) < 20:
             return None
+            
+        # حفظ تاريخ آخر يوم تداول فعلي في الأسبوع حتى نتمكن من دمج الأسبوع الحالي بشكل صحيح عند الدمج مع اليومي
+        # هذا يحل مشكلة يوم الأحد، حيث يكون الشمعة الأسبوعية بـ(تاريخ الأحد) وليس (الخميس القادم) 
+        weekly_dates = df.index.to_series().resample('W-THU').max()
+        df_weekly.index = weekly_dates.loc[df_weekly.index]
         # expose weekly close with '_w' suffix so merged dataframe contains it
         df_weekly['close_w'] = df_weekly['close']
         
