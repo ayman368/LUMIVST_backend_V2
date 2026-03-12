@@ -106,24 +106,48 @@ class TechnicalCalculator:
         logger.info("   ... حساب التغير (Change)")
         df['change'] = grouped['close'].transform(lambda x: x.diff())
 
-        # 6. حساب 21-Day EMA (Exponential Moving Average)
-        logger.info("   ... حساب 21-Day EMA")
-        def calc_ema(close_prices):
-            return close_prices.ewm(span=21, adjust=False).mean()
-        df['ema_21'] = grouped['close'].transform(calc_ema)
+        # 6. حساب 21-Day EMA (TradingView Exact Match)
+        logger.info("   ... حساب 21-Day و 10-Day EMA (PineScript)")
+        
+        def calc_ema_tv_real(series, period):
+            import numpy as np
+            vals = series.values
+            ema_vals = [np.nan] * len(vals)
+            alpha = 2.0 / (period + 1.0)
+            
+            # Find the first non-NaN value to start the period window
+            first_valid_idx = series.first_valid_index()
+            if first_valid_idx is None:
+                return pd.Series(ema_vals, index=series.index)
+                
+            start_idx = series.index.get_loc(first_valid_idx)
+            
+            # Need at least 'period' elements to calculate the first EMA (which is an SMA)
+            if len(vals) - start_idx < period:
+                return pd.Series(ema_vals, index=series.index)
+                
+            # First EMA is SMA of the first 'period' valid elements
+            first_ema_idx = start_idx + period - 1
+            ema_vals[first_ema_idx] = np.mean(vals[start_idx : first_ema_idx + 1])
+            
+            # Calculate the rest using the EMA formula
+            for i in range(first_ema_idx + 1, len(vals)):
+                if np.isnan(vals[i]):
+                    ema_vals[i] = ema_vals[i-1] # Carry forward or skip based on preference. TVs carries forward.
+                else:
+                    ema_vals[i] = (vals[i] - ema_vals[i-1]) * alpha + ema_vals[i-1]
+                    
+            return pd.Series(ema_vals, index=series.index)
 
-        # 6.1 حساب 10-Day EMA (إضافة جديدة)
-        logger.info("   ... حساب 10-Day EMA")
-        def calc_ema_10(close_prices):
-            return close_prices.ewm(span=10, adjust=False).mean()
-        df['ema_10'] = grouped['close'].transform(calc_ema_10)
+        df['ema_21'] = grouped['close'].transform(lambda x: calc_ema_tv_real(x, 21))
+
+        # 6.1 حساب 10-Day EMA
+        df['ema_10'] = grouped['close'].transform(lambda x: calc_ema_tv_real(x, 10))
 
         # 6.2 حساب 20-Day EMA و 3-Day SMA (EMA20(SMA3))
         logger.info("   ... حساب EMA20(SMA3)")
         df['sma_3'] = grouped['close'].transform(lambda x: x.rolling(window=3).mean())
-        def calc_ema_20_sma3(sma3_prices):
-            return sma3_prices.ewm(span=20, adjust=False).mean()
-        df['ema_20_sma3'] = grouped['sma_3'].transform(calc_ema_20_sma3)
+        df['ema_20_sma3'] = grouped['sma_3'].transform(lambda x: calc_ema_tv_real(x, 20))
 
         # 7. حساب قيم 200MA التاريخية (للمقارنات)
         logger.info("   ... حساب 200MA التاريخية")
@@ -219,26 +243,30 @@ class TechnicalCalculator:
             cci_ema = cci_vals.ewm(span=20, adjust=False).mean()
             df.loc[symbol_df.index, 'cci_ema_20'] = cci_ema
             
-            # Aroon Up (period since 14-bar high)
+            # Aroon (25-period) - Pine Script exact match
+            # aroonUp = 100 * (period - barssince(high == highest(high, period))) / period
+            # barssince=0 means current bar → aroonUp=100
             high_vals = symbol_df['high'].values
             aroon_up_vals = []
             for i in range(len(high_vals)):
-                if i < 13:
+                if i < 25:
                     aroon_up_vals.append(np.nan)
                 else:
-                    periods = 14 - (np.argmax(high_vals[i-13:i+1][::-1]) + 1)
-                    aroon_up_vals.append((periods / 14) * 100)
+                    # window: i-25 to i inclusive (26 bars = period+1)
+                    window = high_vals[i-25:i+1]
+                    days_since_high = np.argmax(window[::-1])  # 0 = current bar
+                    aroon_up_vals.append((25 - days_since_high) / 25 * 100)
             df.loc[symbol_df.index, 'aroon_up'] = aroon_up_vals
-            
-            # Aroon Down (period since 14-bar low)
+
             low_vals = symbol_df['low'].values
             aroon_down_vals = []
             for i in range(len(low_vals)):
-                if i < 13:
+                if i < 25:
                     aroon_down_vals.append(np.nan)
                 else:
-                    periods = 14 - (np.argmin(low_vals[i-13:i+1][::-1]) + 1)
-                    aroon_down_vals.append((periods / 14) * 100)
+                    window = low_vals[i-25:i+1]
+                    days_since_low = np.argmin(window[::-1])  # 0 = current bar
+                    aroon_down_vals.append((25 - days_since_low) / 25 * 100)
             df.loc[symbol_df.index, 'aroon_down'] = aroon_down_vals
 
         # 5. حساب النسب المئوية (للفلترة والعرض المتقدم)
@@ -280,11 +308,16 @@ class TechnicalCalculator:
                     update_stmt = text("""
                         UPDATE prices
                         SET change = :change,
-                            price_minus_sma_10 = :p10,
-                            price_minus_sma_21 = :p21,
-                            price_minus_sma_50 = :p50,
-                            price_minus_sma_150 = :p150,
-                            price_minus_sma_200 = :p200,
+                            sma_10 = :sma_10,
+                            sma_21 = :sma_21,
+                            sma_50 = :sma_50,
+                            sma_150 = :sma_150,
+                            sma_200 = :sma_200,
+                            price_minus_sma_10 = :p_minus_10,
+                            price_minus_sma_21 = :p_minus_21,
+                            price_minus_sma_50 = :p_minus_50,
+                            price_minus_sma_150 = :p_minus_150,
+                            price_minus_sma_200 = :p_minus_200,
                             fifty_two_week_high = :h52,
                             fifty_two_week_low = :l52,
                             average_volume_50 = :avg_vol,
@@ -324,11 +357,16 @@ class TechnicalCalculator:
                     
                     params = {
                         'change': round(row['change'], 2) if pd.notnull(row['change']) else None,
-                        'p10': row['sma_10'] if pd.notnull(row['sma_10']) else None,
-                        'p21': row['sma_21'] if pd.notnull(row['sma_21']) else None,
-                        'p50': row['sma_50'] if pd.notnull(row['sma_50']) else None,
-                        'p150': row['sma_150'] if pd.notnull(row['sma_150']) else None,
-                        'p200': row['sma_200'] if pd.notnull(row['sma_200']) else None,
+                        'sma_10': row['sma_10'] if pd.notnull(row['sma_10']) else None,
+                        'sma_21': row['sma_21'] if pd.notnull(row['sma_21']) else None,
+                        'sma_50': row['sma_50'] if pd.notnull(row['sma_50']) else None,
+                        'sma_150': row['sma_150'] if pd.notnull(row['sma_150']) else None,
+                        'sma_200': row['sma_200'] if pd.notnull(row['sma_200']) else None,
+                        'p_minus_10': float(row['close'] - row['sma_10']) if pd.notnull(row['close']) and pd.notnull(row['sma_10']) else None,
+                        'p_minus_21': float(row['close'] - row['sma_21']) if pd.notnull(row['close']) and pd.notnull(row['sma_21']) else None,
+                        'p_minus_50': float(row['close'] - row['sma_50']) if pd.notnull(row['close']) and pd.notnull(row['sma_50']) else None,
+                        'p_minus_150': float(row['close'] - row['sma_150']) if pd.notnull(row['close']) and pd.notnull(row['sma_150']) else None,
+                        'p_minus_200': float(row['close'] - row['sma_200']) if pd.notnull(row['close']) and pd.notnull(row['sma_200']) else None,
                         'h52': row['fifty_two_week_high'] if pd.notnull(row['fifty_two_week_high']) else None,
                         'l52': row['fifty_two_week_low'] if pd.notnull(row['fifty_two_week_low']) else None,
                         'avg_vol': int(row['average_volume_50']) if pd.notnull(row['average_volume_50']) else 0,

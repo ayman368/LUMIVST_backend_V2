@@ -88,12 +88,16 @@ def indicator_to_dict_with_prices(ind: StockIndicator, price: Price) -> dict:
         'date': str(ind.date) if ind.date else None,
         'close': safe_float(ind.close),
         
-        # ============ MA VALUES FROM PRICES TABLE (with underscore) ============
+        # ============ MA VALUES FROM PRICES TABLE (with underscore - legacy) ============
         'ema_10': safe_float(price.ema_10) if price else None,
         'ema_21': safe_float(price.ema_21) if price else None,
         'sma_50': safe_float(price.sma_50) if price else None,
         'sma_150': safe_float(price.sma_150) if price else None,
         'sma_200': safe_float(price.sma_200) if price else None,
+        
+        # ============ PineScript-exact EMA (from stock_indicators) ============
+        'ema10': safe_float(ind.ema10),
+        'ema21': safe_float(ind.ema21),
         
         # ============ DAILY: RSI Components ============
         'rsi_14': safe_float(ind.rsi_14),

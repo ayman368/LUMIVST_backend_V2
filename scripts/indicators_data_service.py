@@ -563,8 +563,10 @@ class IndicatorsDataService:
             'cfg_ema45_gt_50': current_stamp['cfg_ema45'] is not None and current_stamp['cfg_ema45'] > 50 if current_stamp['cfg_ema45'] is not None else False,
             'cfg_ema20_gt_50': current_stamp['cfg_ema20'] is not None and current_stamp['cfg_ema20'] > 50 if current_stamp['cfg_ema20'] is not None else False,
             
-            # ===== 5. Trend Screener (NOTE: ema_10, ema_21, sma_50, sma_150, sma_200 are stored in prices table) =====
-            # No longer storing in stock_indicators - they are queried from prices table via JOIN in API
+            # ===== 5. Trend Screener =====
+            # Store PineScript-exact EMA values directly in stock_indicators
+            'ema10': current_trend['ema10'],
+            'ema21': current_trend['ema21'],
             'sma4': current_trend['sma4'],
             'sma9': current_trend['sma9'],
             'sma18': current_trend['sma18'],

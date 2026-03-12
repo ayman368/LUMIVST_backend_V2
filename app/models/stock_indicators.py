@@ -17,7 +17,6 @@ class StockIndicator(Base):
     
     # Company Info
     company_name = Column(String(255), nullable=True)
-    
     # Price
     close = Column(Numeric(12, 4), nullable=True)
     
@@ -116,9 +115,9 @@ class StockIndicator(Base):
     cfg_ema20_gt_50_w = Column(Boolean, default=False)
     
     # ============ 5. TREND SCREENER COMPONENTS ============
-    # Price Moving Averages - Daily
-    # NOTE: ema_10, ema_21, sma_50, sma_150, sma_200 are stored in PRICES table with underscore
-    # We JOIN with prices table to get these values
+    # Price Moving Averages - Daily (PineScript-exact EMA values)
+    ema10 = Column(Numeric(12, 4), nullable=True)               # ✅ EMA10 PineScript exact
+    ema21 = Column(Numeric(12, 4), nullable=True)               # ✅ EMA21 PineScript exact
     sma4 = Column(Numeric(12, 4), nullable=True)
     sma9 = Column(Numeric(12, 4), nullable=True)
     sma18 = Column(Numeric(12, 4), nullable=True)

@@ -209,7 +209,7 @@ def calculate_weekly_components(df_weekly: pd.DataFrame) -> Dict[str, Any]:
     cci_w_series = calculate_cci_pinescript_exact(highs_w, lows_w, closes_w, 14)
     cci_ema20_w_series = calculate_ema(cci_w_series, 20)
     
-    # 3. Aroon الأسبوعي
+    # 3. Aroon الأسبوعي (25)
     aroon_up_w_series, aroon_down_w_series = calculate_aroon_pinescript_exact(highs_w, lows_w, 25)
     
     # الحصول على آخر قيمة (القيمة الحالية)
