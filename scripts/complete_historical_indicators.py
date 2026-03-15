@@ -10,6 +10,8 @@ import argparse
 import pandas as pd
 import numpy as np
 import logging
+import io
+import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any
 
@@ -276,38 +278,88 @@ def calculate_complete_indicators_for_symbol(symbol: str, df_prices: pd.DataFram
         return []
 
 def bulk_save_complete_records(records: List[Dict[str, Any]], db_session):
-    """Save complete records in bulk with upsert"""
+    """Save complete records in bulk using ultra-fast COPY with temporary table upsert"""
     if not records:
         return 0
 
     try:
-        # Split into chunks for memory efficiency
-        chunk_size = 200  # Smaller chunks for complete data
-        total_saved = 0
+        if not records:
+            return 0
 
-        for i in range(0, len(records), chunk_size):
-            chunk = records[i:i + chunk_size]
+        # Create a CSV in memory
+        csv_buffer = io.StringIO()
+        
+        # Get all keys from the first record (assuming homogeneous dictionaries)
+        # Filter out keys with None values in the first pass just to get base structure
+        # But for SQL COPY, we need all columns consistent. We use the keys of the first record.
+        # Ensure 'id' is not in keys as it's auto-generated
+        keys = [k for k in records[0].keys() if k != 'id']
+        keys.append('created_at') # Always supply this explicitly or let DB handle it. We will let DB handle it by not including it or explicitly setting None
+        if 'created_at' in keys: keys.remove('created_at')
 
-            stmt = insert(StockIndicator).values(chunk)
-            update_dict = {
-                c.name: c for c in stmt.excluded
-                if c.name not in ('id', 'symbol', 'date', 'created_at')
-            }
-            stmt = stmt.on_conflict_do_update(
-                index_elements=['symbol', 'date'],
-                set_=update_dict
-            )
-            db_session.execute(stmt)
+        writer = csv.DictWriter(csv_buffer, fieldnames=keys, extrasaction='ignore')
+        writer.writerows(records)
+        csv_buffer.seek(0)
+        
+        # We need the raw psycopg2 connection to use copy_expert
+        raw_conn = db_session.connection().connection
+        cursor = raw_conn.cursor()
 
-            total_saved += len(chunk)
+        # 1. Create a temporary table with the exact same structure
+        temp_table_name = "temp_stock_indicators"
+        cursor.execute(f"CREATE TEMP TABLE {temp_table_name} (LIKE stock_indicators INCLUDING ALL)")
+
+        # 2. Use COPY to load data directly into the temp table
+        columns_str = ", ".join(keys)
+        copy_sql = f"COPY {temp_table_name} ({columns_str}) FROM STDIN WITH CSV"
+        cursor.copy_expert(sql=copy_sql, file=csv_buffer)
+
+        # 3. UPSERT data from the temp table to the main table
+        # We create the SET clause dynamically for all columns except the primary keys
+        update_cols = [col for col in keys if col not in ('id', 'symbol', 'date', 'created_at')]
+        set_statements = ", ".join([f"{col} = EXCLUDED.{col}" for col in update_cols])
+
+        upsert_sql = f"""
+            INSERT INTO stock_indicators ({columns_str})
+            SELECT {columns_str} FROM {temp_table_name}
+            ON CONFLICT (symbol, date) DO UPDATE SET
+            {set_statements};
+        """
+        cursor.execute(upsert_sql)
+
+        # 4. Drop the temporary table (optional as it drops on disconnect, but good practice)
+        cursor.execute(f"DROP TABLE {temp_table_name}")
 
         db_session.commit()
-        return total_saved
+        return len(records)
 
     except Exception as e:
-        logger.error(f"❌ Error saving complete records: {e}")
+        logger.error(f"❌ Error saving complete records via COPY method: {e}")
         db_session.rollback()
-        return 0
+        # Fallback to standard line-by-line upsert if COPY fails
+        try:
+            logger.info("⚠️ Falling back to slow standard insert method...")
+            chunk_size = 200
+            total_saved = 0
+            for i in range(0, len(records), chunk_size):
+                chunk = records[i:i + chunk_size]
+                stmt = insert(StockIndicator).values(chunk)
+                update_dict = {
+                    c.name: c for c in stmt.excluded
+                    if c.name not in ('id', 'symbol', 'date', 'created_at')
+                }
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['symbol', 'date'],
+                    set_=update_dict
+                )
+                db_session.execute(stmt)
+                total_saved += len(chunk)
+            db_session.commit()
+            return total_saved
+        except Exception as e2:
+            logger.error(f"❌ Total failure in saving records: {e2}")
+            db_session.rollback()
+            return 0
 
 def calculate_complete_historical_ultra_fast(symbols_list: List[str] = None, max_workers: int = 2):
     """Ultra-fast complete historical calculation using parallel processing"""

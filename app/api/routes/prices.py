@@ -64,6 +64,24 @@ async def get_price_history(
                 # ── PineScript-exact EMAs (from stock_indicators) ───────────
                 "ema_10":  f(ind.ema10) if ind else None,
                 "ema_21":  f(ind.ema21) if ind else None,
+                # ── Historical 200MA (from stock_indicators) ───────────────
+                "sma_200_1m_ago": f(ind.sma_200_1m_ago) if ind else None,
+                "sma_200_2m_ago": f(ind.sma_200_2m_ago) if ind else None,
+                "sma_200_3m_ago": f(ind.sma_200_3m_ago) if ind else None,
+                "sma_200_4m_ago": f(ind.sma_200_4m_ago) if ind else None,
+                "sma_200_5m_ago": f(ind.sma_200_5m_ago) if ind else None,
+                # ── Weekly SMAs (from stock_indicators) ────────────────────
+                "sma_30w": f(ind.sma_30w) if ind else None,
+                "sma_40w": f(ind.sma_40w) if ind else None,
+                # ── Additional SMAs (from stock_indicators) ────────────────
+                "sma_3": f(ind.sma3_rsi3) if ind else None,
+                "ema_20_sma3": f(ind.ema20_sma3) if ind else None,
+                # ── Price vs SMA % (from stock_indicators) ──────────────────
+                "price_vs_sma_10_percent": f(ind.price_vs_sma_10_percent) if ind else None,
+                "price_vs_sma_21_percent": f(ind.price_vs_sma_21_percent) if ind else None,
+                "price_vs_sma_50_percent": f(ind.price_vs_sma_50_percent) if ind else None,
+                "price_vs_sma_150_percent": f(ind.price_vs_sma_150_percent) if ind else None,
+                "price_vs_sma_200_percent": f(ind.price_vs_sma_200_percent) if ind else None,
                 # ── 52-Week & Volume Stats ──────────────────────────────────
                 "fifty_two_week_high": f(ind.fifty_two_week_high) if ind else None,
                 "fifty_two_week_low":  f(ind.fifty_two_week_low)  if ind else None,
@@ -110,17 +128,22 @@ async def get_price_history(
                 "stamp_s9rsi_w":  f(ind.stamp_s9rsi_w)  if ind else None,
                 "stamp_e45cfg_w": f(ind.stamp_e45cfg_w) if ind else None,
                 "stamp_e45rsi_w": f(ind.stamp_e45rsi_w) if ind else None,
+                "stamp_e20sma3_w": f(ind.stamp_e20sma3_w) if ind else None,
                 # ── Price MAs from indicators ──────────────────────────────
                 "sma4":  f(ind.sma4)  if ind else None,
                 "sma9":  f(ind.sma9_close) if ind else None,
                 "sma18": f(ind.sma18) if ind else None,
+                "wma45_close": f(ind.wma45_close) if ind else None,
                 # ── Weekly price MAs ─────────────────────────────────────
                 "sma4_w":  f(ind.sma4_w)  if ind else None,
                 "sma9_w":  f(ind.sma9_w)  if ind else None,
                 "sma18_w": f(ind.sma18_w) if ind else None,
+                "wma45_close_w": f(ind.wma45_close_w) if ind else None,
                 # ── Aroon ─────────────────────────────────────────────────
                 "aroon_up":   f(ind.aroon_up)   if ind else None,
                 "aroon_down": f(ind.aroon_down) if ind else None,
+                "aroon_up_w":   f(ind.aroon_up_w)   if ind else None,
+                "aroon_down_w": f(ind.aroon_down_w) if ind else None,
             })
 
         return {"symbol": symbol, "count": len(data), "data": data}
