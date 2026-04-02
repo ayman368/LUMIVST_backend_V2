@@ -387,6 +387,7 @@ def get_company_financial_data_by_section(
     symbol: str,
     year: Optional[int] = Query(None),
     period: Optional[str] = Query(None),
+    period_type: Optional[str] = Query(None, description="'annual', 'quarterly', or 'all'"),
     db: Session = Depends(get_db)
 ):
     """
@@ -395,8 +396,10 @@ def get_company_financial_data_by_section(
     Query params:
     - year: Filter by specific year (optional)
     - period: Filter by specific period - ANNUAL, Q1, Q2, Q3, Q4 (optional)
+    - period_type: Filter by 'annual' or 'quarterly' 
     """
     from sqlalchemy.orm import joinedload
+    from sqlalchemy import func
     
     # Get metrics with JOINs to avoid N+1 queries
     query = db.query(CompanyFinancialMetric).filter(
@@ -408,7 +411,14 @@ def get_company_financial_data_by_section(
     
     if period:
         query = query.filter(CompanyFinancialMetric.period == period)
-    
+        
+    if period_type:
+        ptype = period_type.lower()
+        if ptype == 'annual':
+            query = query.filter(func.lower(CompanyFinancialMetric.period) == 'annual')
+        elif ptype == 'quarterly':
+            query = query.filter(func.lower(CompanyFinancialMetric.period) != 'annual')
+            
     metrics = query.order_by(
         CompanyFinancialMetric.year.desc(),
         CompanyFinancialMetric.period
@@ -444,7 +454,8 @@ def get_company_financial_data_by_section(
         category = categories_map.get(metric.metric_name)
         section = category.section if category else 'other'
         
-        period_key = f"{metric.year} {metric.period}"
+        source_str = metric.source_file if metric.source_file else "unknown"
+        period_key = f"{metric.year} {metric.period}::{source_str}"
         
         metric_obj = {
             "key": metric.metric_name,

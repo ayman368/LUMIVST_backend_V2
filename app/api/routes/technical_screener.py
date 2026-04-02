@@ -32,7 +32,21 @@ def get_technical_screener_data(
         query = query.filter(StockIndicator.date == target_date)
         result_date = target_date
     elif latest_only:
-        latest = db.query(func.max(StockIndicator.date)).scalar()
+        # Get latest ready date from the global update_status table to ensure consistency
+        from app.models.update_status import UpdateStatus
+        from sqlalchemy import text as sa_text
+        status_row = db.execute(sa_text("SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1")).fetchone()
+        
+        if status_row and status_row[0]:
+            # Always use latest_ready_date (points to last COMPLETE day)
+            latest = status_row[0]
+        elif status_row and status_row[1]:
+            # is_updating=TRUE but no latest_ready_date → system just initialised
+            return {"data": [], "total": 0, "date": None}
+        else:
+            # Fallback only if update_status row doesn't exist at all
+            latest = db.query(func.max(StockIndicator.date)).scalar()
+            
         if latest:
             query = query.filter(StockIndicator.date == latest)
             result_date = str(latest)
@@ -115,6 +129,7 @@ def indicator_to_dict(ind: StockIndicator) -> dict:
         'percent_off_52w_high': safe_float(ind.percent_off_52w_high),
         'percent_off_52w_low':  safe_float(ind.percent_off_52w_low),
         'vol_diff_50_percent':  safe_float(ind.vol_diff_50_percent),
+        'beta':  safe_float(ind.beta),
 
         # ============ DAILY: RSI Components ============
         'rsi_14': safe_float(ind.rsi_14),

@@ -118,7 +118,7 @@ def calculate_all_indicators_for_stock(db: Session, symbol: str, target_date: da
     return result
 
 
-def calculate_and_store_indicators(db: Session, target_date: date = None, target_symbol: str = None):
+def calculate_and_store_indicators(db: Session, target_date: date = None, target_symbol: str = None, tech_map: dict = None):
     """
     حساب وتخزين جميع المؤشرات لجميع الأسهم
     
@@ -187,6 +187,8 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
     successful = 0
     error_details = []
     
+    all_indicators_data = []
+    
     for symbol, company_name in symbols_data.items():
         try:
             print(f"📊 Processing {symbol} ({company_name})...")
@@ -214,6 +216,13 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
                 **data
             }
             
+            # Merge pre-calculated technical data (SMAs, 52W, Vol) if available
+            if tech_map and symbol in tech_map:
+                tech_vals = tech_map[symbol]
+                for k, v in tech_vals.items():
+                    if k != 'date':  # skip date, already set
+                        indicator_data.setdefault(k, v)  # don't overwrite PineScript values
+            
             # تنظيف البيانات (تحويل numpy types إلى Python types وتقريب الأرقام لخانين لتطابق TradingView)
             for k, v in indicator_data.items():
                 if isinstance(v, (np.float64, np.float32, np.integer)):
@@ -225,17 +234,8 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
                 elif isinstance(v, (list, dict, np.ndarray, pd.Series)):
                     indicator_data[k] = None  # لا نخزن القوائم في قاعدة البيانات
             
-            # إدراج أو تحديث البيانات
-            stmt = insert(StockIndicator).values(indicator_data)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=['symbol', 'date'],
-                set_={k: v for k, v in indicator_data.items() if k not in ['symbol', 'date', 'created_at']}
-            )
-            
-            db.execute(stmt)
-            db.commit()
+            all_indicators_data.append(indicator_data)
             processed += 1
-            successful += 1
             
             if processed % 10 == 0:
                 print(f"✅ Processed {processed}/{total_stocks} stocks...")
@@ -245,9 +245,30 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
             print(f"❌ Error processing {symbol}: {e}")
             import traceback
             traceback.print_exc()
-            db.rollback()
             errors += 1
             error_details.append(f"{symbol}: {str(e)}")
+
+    print("-" * 60)
+    print(f"💾 Saving {len(all_indicators_data)} stock indicators atomically to database...")
+    
+    if all_indicators_data:
+        try:
+            for indicator_data in all_indicators_data:
+                stmt = insert(StockIndicator).values(indicator_data)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['symbol', 'date'],
+                    set_={k: v for k, v in indicator_data.items() if k not in ['symbol', 'date', 'created_at']}
+                )
+                db.execute(stmt)
+            
+            db.commit()
+            successful = len(all_indicators_data)
+            print("✅ All stock indicators saved atomically successfully.")
+        except Exception as e:
+            print(f"❌ Error during bulk save: {e}")
+            db.rollback()
+            errors += len(all_indicators_data)
+            error_details.append(f"Bulk Save Error: {str(e)}")
 
     print("-" * 60)
     print("📊 Calculation Summary:")

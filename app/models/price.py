@@ -35,7 +35,12 @@ class Price(Base):
     value_traded_sar = Column(Numeric(18, 2))
     no_of_trades = Column(Integer)
     market_cap = Column(Numeric(20, 2))
-    
+
+    # Static / quarterly fields (update every ~3 months via Excel import)
+    approval_with_controls = Column(String(150), nullable=True)
+    purge_amount = Column(Numeric(18, 6), nullable=True)
+    marginable_percent = Column(Numeric(10, 4), nullable=True)
+
     # Pure market data — technical stats moved to stock_indicators
     # NOTE: sma_*, fifty_two_week_*, average_volume_50, price_vs_sma_*,
     #        price_minus_sma_*, percent_off_52w_*, vol_diff_50_percent,

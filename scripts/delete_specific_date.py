@@ -37,6 +37,13 @@ def delete_data_for_date(target_date_str: str):
             {"target_date": target_date_str}
         )
         print(f"✅ تم حذف {res_rs.rowcount} سجل من جدول rs_daily_v2")
+        # 4. إعادة تعيين latest_ready_date في update_status (للحفاظ على الـ Atomic Switch)
+        res_update = db.execute(text("""
+            UPDATE update_status 
+            SET latest_ready_date = (SELECT MAX(date) FROM prices)
+            WHERE id = 1
+        """))
+        print(f"✅ تم إرجاع المؤشر (latest_ready_date) لتاريخ اليوم السابق بنجاح")
         
         db.commit()
         print("\n🎉 تم الحذف والتأكيد بنجاح!")

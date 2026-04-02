@@ -94,7 +94,7 @@ class IndustryGroupCalculator:
                         COUNT(symbol) as stock_count
                     FROM stock_data
                     GROUP BY industry_group
-                    HAVING COUNT(symbol) >= 2
+                    HAVING COUNT(symbol) >= 1
                 """)
                 
                 with self.db.bind.connect() as connection:
@@ -219,7 +219,7 @@ class IndustryGroupCalculator:
                     AND sp.industry_group = cp.industry_group
                 WHERE sp.start_price > 0 AND cp.current_price > 0
                 GROUP BY sp.industry_group
-                HAVING COUNT(DISTINCT sp.symbol) >= 2
+                HAVING COUNT(DISTINCT sp.symbol) >= 1
             )
             SELECT 
                 sp.industry_group,
@@ -267,7 +267,7 @@ class IndustryGroupCalculator:
                 SELECT industry_group
                 FROM latest_prices
                 GROUP BY industry_group
-                HAVING COUNT(DISTINCT symbol) >= 2
+                HAVING COUNT(DISTINCT symbol) >= 1
             )
             SELECT 
                 lp.industry_group,

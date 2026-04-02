@@ -8,3 +8,5 @@ from app.models.stock_indicators import StockIndicator
 from app.models.financial_metrics import CompanyFinancialMetric
 from app.models.financial_metric_categories import FinancialMetricCategory
 from app.models.company_metric_display_settings import CompanyMetricDisplaySetting
+from app.models.update_status import UpdateStatus
+from app.models.static_stock_info import StaticStockInfo

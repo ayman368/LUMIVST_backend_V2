@@ -68,9 +68,27 @@ async def get_latest_rs_v2(
     Get latest RS ratings from the V2 table (new calculation method).
     """
     try:
-        # Get latest date - use explicit date casting to handle timestamp/date conversion
-        result = db.execute(text("SELECT COALESCE(MAX(date), CURRENT_DATE)::date as latest_date FROM rs_daily_v2"))
-        latest_date = result.scalar()
+        # Get latest READY date - always from update_status (Atomic Switch)
+        # During is_updating=TRUE, latest_ready_date still points to yesterday (safe data)
+        # Fallback: only use MAX(date) when NOT updating (safe), otherwise keep old date
+        result = db.execute(text("""
+            SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1
+        """))
+        row = result.fetchone()
+        
+        if row and row[0]:
+            latest_date = row[0]
+        elif row and row[1]:
+            # is_updating=TRUE but no latest_ready_date → system just initialised, serve nothing
+            return RSV2LatestResponse(data=[], total_count=0, date=date.today())
+        else:
+            # Fully safe fallback: only used when update_status is missing entirely
+            result = db.execute(text("""
+                SELECT COALESCE(MAX(date), CURRENT_DATE)::date 
+                FROM rs_daily_v2 
+                WHERE acc_dis_rating IS NOT NULL
+            """))
+            latest_date = result.scalar()
         
         if not latest_date:
             return RSV2LatestResponse(data=[], total_count=0, date=date.today())
@@ -253,7 +271,7 @@ async def get_industries_v2(
         query = """
             SELECT DISTINCT industry_group, COUNT(*) as count
             FROM rs_daily_v2
-            WHERE date = (SELECT MAX(date) FROM rs_daily_v2)
+            WHERE date = (SELECT latest_ready_date FROM update_status WHERE id = 1)
             AND industry_group IS NOT NULL
             GROUP BY industry_group
             ORDER BY count DESC
@@ -283,12 +301,12 @@ async def get_top_movers_v2(
             WITH latest AS (
                 SELECT symbol, rs_rating as current_rs, date
                 FROM rs_daily_v2
-                WHERE date = (SELECT MAX(date) FROM rs_daily_v2)
+                WHERE date = (SELECT latest_ready_date FROM update_status WHERE id = 1)
             ),
             prev AS (
                 SELECT symbol, rs_rating as prev_rs
                 FROM rs_daily_v2
-                WHERE date = (SELECT MAX(date) - :days FROM rs_daily_v2)
+                WHERE date = (SELECT latest_ready_date - :days FROM update_status WHERE id = 1)
             )
             SELECT l.symbol, l.current_rs, p.prev_rs, (l.current_rs - p.prev_rs) as change
             FROM latest l

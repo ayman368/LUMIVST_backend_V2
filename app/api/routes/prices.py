@@ -1,12 +1,24 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
 from typing import List, Optional
 from datetime import date
 
+import pandas as pd
+
 from app.core.database import get_db
 from app.models.price import Price
 from app.schemas.price import PriceResponse, LatestPricesResponse
+
+
+class StaticStockInfoImportRequest(BaseModel):
+    file1_path: str  # Excel with symbol, approval_with_controls, purge_amount
+    file2_path: str  # Excel with symbol, company_name, marginable_percent
+    symbol_column: str = 'Symbol'  # Default column name in sheets
+    approval_column: str = 'موافقة مع الضوابط'
+    purge_amount_column: str = 'مبلغ التطهير'
+    marginable_column: str = 'Marginable %'
 
 router = APIRouter(prefix="/prices", tags=["Prices"])
 
@@ -155,6 +167,77 @@ async def get_price_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/static-info/import")
+async def import_static_stock_info(request: StaticStockInfoImportRequest, db: Session = Depends(get_db)):
+    """Import quarterly static columns from two Excel files."""
+    try:
+        # Sheet 1: symbol, approval_with_controls, purge_amount
+        df1 = pd.read_excel(request.file1_path, engine='openpyxl')
+        # Sheet 2: symbol, company_name (optional), marginable_percent
+        df2 = pd.read_excel(request.file2_path, engine='openpyxl')
+
+        # Normalize symbol column
+        sym_key = request.symbol_column
+        if sym_key not in df1.columns or sym_key not in df2.columns:
+            raise HTTPException(status_code=400, detail="Symbol column not found in one of the files")
+
+        df1 = df1.rename(columns={
+            sym_key: 'symbol',
+            request.approval_column: 'approval_with_controls',
+            request.purge_amount_column: 'purge_amount'
+        })
+
+        df2 = df2.rename(columns={
+            sym_key: 'symbol',
+            request.marginable_column: 'marginable_percent'
+        })
+
+        df1['symbol'] = df1['symbol'].astype(str).str.strip()
+        df2['symbol'] = df2['symbol'].astype(str).str.strip()
+
+        # Merge static data
+        merged = df1[['symbol', 'approval_with_controls', 'purge_amount']].merge(
+            df2[['symbol', 'marginable_percent']], on='symbol', how='outer')
+            
+        from app.models.static_stock_info import StaticStockInfo
+        from sqlalchemy.dialects.postgresql import insert
+
+        updated = 0
+        for _, row in merged.iterrows():
+            symbol = str(row['symbol']).strip()
+            if not symbol:
+                continue
+
+            values = {
+                "approval_with_controls": row.get('approval_with_controls'),
+                "purge_amount": pd.to_numeric(row.get('purge_amount'), errors='coerce'),
+                "marginable_percent": pd.to_numeric(row.get('marginable_percent'), errors='coerce')
+            }
+            # Clean NaNs
+            values = {k: (v if not pd.isna(v) else None) for k, v in values.items()}
+
+            stmt = insert(StaticStockInfo).values(symbol=symbol, **values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=['symbol'],
+                set_=values
+            )
+            db.execute(stmt)
+            updated += 1
+            
+        db.commit()
+
+        return {
+            "success": True,
+            "updated_rows": updated,
+            "timestamp": date.today().isoformat(),
+            "message": "Static stock data imported successfully"
+        }
+    except Exception as e:
+        db.rollback()
+        print(f"Error importing static stock info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/latest", response_model=LatestPricesResponse)
 async def get_latest_prices(
     db: Session = Depends(get_db),
@@ -165,13 +248,22 @@ async def get_latest_prices(
     Finds the most recent date in the prices table and returns all records for that date.
     """
     try:
-        # 1. Find the latest date
-        latest_date_row = db.query(Price.date).order_by(desc(Price.date)).first()
+        # 1. Get the atomic latest_ready_date from update_status
+        from sqlalchemy import text as sa_text
+        status_row = db.execute(sa_text("SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1")).fetchone()
         
-        if not latest_date_row:
+        if status_row and status_row[0]:
+            # Always use latest_ready_date (points to last COMPLETE day)
+            latest_date = status_row[0]
+        elif status_row and status_row[1]:
+            # is_updating=TRUE but no latest_ready_date → system just initialised, serve nothing
             return LatestPricesResponse(date=date.today(), count=0, data=[])
-        
-        latest_date = latest_date_row[0]
+        else:
+            # Fallback only if update_status row doesn't exist at all
+            latest_date_row = db.query(Price.date).order_by(desc(Price.date)).first()
+            if not latest_date_row:
+                return LatestPricesResponse(date=date.today(), count=0, data=[])
+            latest_date = latest_date_row[0]
         
         # 2. Query data for that date
         results = db.query(Price).filter(Price.date == latest_date).limit(limit).all()
@@ -201,8 +293,24 @@ async def get_latest_prices(
         # But wait, Pydantic's from_attributes=True might try to read it from the object.
         # If we just attach it to the object instances, python allows it.
         
+        # 4. Fetch Static Info and attach it
+        from app.models.static_stock_info import StaticStockInfo
+        static_rows = db.query(StaticStockInfo).all()
+        static_map = {row.symbol: row for row in static_rows}
+        
         for price in results:
             price.trading_view_symbol = tv_mapping.get(str(price.symbol))
+            
+            # Attach static info dynamically
+            s_info = static_map.get(str(price.symbol))
+            if s_info:
+                price.approval_with_controls = s_info.approval_with_controls
+                price.purge_amount = s_info.purge_amount
+                price.marginable_percent = s_info.marginable_percent
+            else:
+                price.approval_with_controls = None
+                price.purge_amount = None
+                price.marginable_percent = None
 
         return LatestPricesResponse(
             date=latest_date,

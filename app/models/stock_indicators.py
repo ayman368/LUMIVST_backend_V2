@@ -151,10 +151,12 @@ class StockIndicator(Base):
     cci_ema20_gt_0_daily = Column(Boolean, default=False)
     
     # ============ 6. MARKET STATISTICS (formerly in prices table) ============
-    # Standard Daily SMAs (SMA 10/21/50/150/200)
+    # Standard Daily SMAs (SMA 10/20/21/50/100/150/200)
     sma_10  = Column(Numeric(14, 4), nullable=True)
+    sma_20  = Column(Numeric(14, 4), nullable=True)
     sma_21  = Column(Numeric(14, 4), nullable=True)
     sma_50  = Column(Numeric(14, 4), nullable=True)
+    sma_100 = Column(Numeric(14, 4), nullable=True)
     sma_150 = Column(Numeric(14, 4), nullable=True)
     sma_200 = Column(Numeric(14, 4), nullable=True)
 
@@ -176,15 +178,19 @@ class StockIndicator(Base):
 
     # Price vs SMA (Absolute difference)
     price_minus_sma_10  = Column(Numeric(14, 4), nullable=True)
+    price_minus_sma_20  = Column(Numeric(14, 4), nullable=True)
     price_minus_sma_21  = Column(Numeric(14, 4), nullable=True)
     price_minus_sma_50  = Column(Numeric(14, 4), nullable=True)
+    price_minus_sma_100 = Column(Numeric(14, 4), nullable=True)
     price_minus_sma_150 = Column(Numeric(14, 4), nullable=True)
     price_minus_sma_200 = Column(Numeric(14, 4), nullable=True)
 
     # Price vs SMA (Percentage)
     price_vs_sma_10_percent  = Column(Numeric(14, 4), nullable=True)
+    price_vs_sma_20_percent  = Column(Numeric(14, 4), nullable=True)
     price_vs_sma_21_percent  = Column(Numeric(14, 4), nullable=True)
     price_vs_sma_50_percent  = Column(Numeric(14, 4), nullable=True)
+    price_vs_sma_100_percent = Column(Numeric(14, 4), nullable=True)
     price_vs_sma_150_percent = Column(Numeric(14, 4), nullable=True)
     price_vs_sma_200_percent = Column(Numeric(14, 4), nullable=True)
 
@@ -221,6 +227,7 @@ class StockIndicator(Base):
     is_etf_or_index = Column(Boolean, default=False)
     has_gap = Column(Boolean, default=False)
     trend_signal = Column(Boolean, default=False)              # ✅ إشارة التريند النهائية
+    beta = Column(Numeric(12, 4), nullable=True)               # ✅ Beta (Volatility vs Benchmark)
     
     # ============ 6. RSI SCREENER ============
     # RSI Screener Conditions

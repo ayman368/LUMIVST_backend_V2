@@ -319,7 +319,8 @@ class RSCalculatorUltraFast:
                     else:
                         percentiles = np.array([50]) # Fallback for single item
                         
-                    period_ranks[period][valid_mask] = np.clip(np.round(percentiles), 1, 99)
+                    # Excel ROUND(..., 0) behaves as np.floor(x + 0.5) for positive numbers
+                    period_ranks[period][valid_mask] = np.minimum(np.floor(percentiles + 0.5), 99)
                 
                 # Assign to dataframe for saving/debugging
                 df[f'rank_{period}'] = pd.Series(period_ranks[period]).fillna(-1).astype(int).replace({-1: None})
@@ -372,11 +373,11 @@ class RSCalculatorUltraFast:
                     'return_9m': float(row['return_9m']),
                     'return_12m': float(row['return_12m']),
                     'rs_raw': float(row['rs_raw']),
-                    'rs_rating': row.get('rs_rating'),
-                    'rank_3m': row.get('rank_3m'),
-                    'rank_6m': row.get('rank_6m'),
-                    'rank_9m': row.get('rank_9m'),
-                    'rank_12m': row.get('rank_12m'),
+                    'rs_rating': int(row['rs_rating']) if row.get('rs_rating') is not None else None,
+                    'rank_3m': int(row['rank_3m']) if row.get('rank_3m') is not None else None,
+                    'rank_6m': int(row['rank_6m']) if row.get('rank_6m') is not None else None,
+                    'rank_9m': int(row['rank_9m']) if row.get('rank_9m') is not None else None,
+                    'rank_12m': int(row['rank_12m']) if row.get('rank_12m') is not None else None,
                     'company_name': str(row['company_name']),
                     'industry_group': str(row['industry_group']),
                     'has_complete_data': not np.isnan(row['rs_raw'])
@@ -788,6 +789,10 @@ class RSCalculatorUltraFast:
             # Replace any remaining zeros with tiny value to avoid division by zero
             df_wide = df_wide.replace(0, 0.000001)
             
+            # CRITICAL FIX 1: Sparsity Bug (Forward fill up to 10 trading days for halted/illiquid stocks)
+            print("🔧 Applying Forward Fill to handle halted/illiquid stocks...")
+            df_wide = df_wide.ffill(limit=10)
+            
             periods = {
                 '3m': 63,
                 '6m': 126,
@@ -840,16 +845,28 @@ class RSCalculatorUltraFast:
                 # Convert to numeric, errors='coerce' turns non-numeric to NaN
                 df_all[col] = pd.to_numeric(df_all[col], errors='coerce')
                 
-                # Calculate rank only on valid numeric values
-                # groupby(date) respects the date index or column
-                # we need to ensure we don't rank NaNs as 100 or something wrong
-                # rank(pct=True) naturally handles NaNs by ignoring them in calculation but keeping them as NaN in output if na_option='keep' (default)
-                df_all[rank_col] = df_all.groupby('date')[col].rank(pct=True, method='average') * 100
+                # CRITICAL FIX 2: PERCENTRANK.INC Logic
+                # Pandas default rank(pct=True) calculates rank/N (from 0.5% to 100%).
+                # IBD uses (rank-1)/(N-1) (from 0% to 100%).
                 
-                # Fill missing ranks with -1 for now, then clip valid ones
-                # We do NOT want to fill NaNs with 50 here because that would imply average performance for missing data
-                # Instead, leave them as NaN so they are ignored in the weighted average
-                df_all[rank_col] = df_all[rank_col].round().clip(1, 99)
+                # We calculate standard rank (1 to N)
+                ranks = df_all.groupby('date')[col].rank(method='average', na_option='keep')
+                
+                # Count non-NaN items per date
+                counts = df_all.groupby('date')[col].transform('count')
+                
+                # Apply PERCENTRANK.INC formula -> (rank - 1) / (count - 1) * 100
+                # If count is 1, default to 50
+                percentiles = np.where(counts > 1, ((ranks - 1) / (counts - 1)) * 100, 50)
+                
+                # Convert back to Series for assignment
+                percentiles_series = pd.Series(percentiles, index=df_all.index)
+                
+                # Mask out original NaNs
+                percentiles_series = percentiles_series.where(df_all[col].notna(), np.nan)
+                
+                # Excel ROUND(..., 0) behaves as np.floor(x + 0.5) for positive numbers
+                df_all[rank_col] = np.minimum(np.floor(percentiles_series + 0.5), 99)
 
             # 6. Calculate Weighted RS (Dynamic Weights Logic)
             print("🧮 Calculating Final Weighted RS...")
@@ -1062,7 +1079,17 @@ class RSCalculatorUltraFast:
         df_clean = df[cols_to_save].copy()
         
         # تنظيف البيانات بسرعة
-        for col in df_clean.select_dtypes(include=[np.number]).columns:
+        # CRITICAL: Convert integer columns FIRST before generic str conversion
+        int_cols = ['rs_rating', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m']
+        for col in int_cols:
+            if col in df_clean.columns:
+                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+                df_clean[col] = df_clean[col].where(df_clean[col].notna(), None)
+                df_clean[col] = df_clean[col].apply(lambda x: int(x) if x is not None and not pd.isna(x) else None)
+        
+        # Now convert remaining float columns to string
+        float_cols = [c for c in df_clean.select_dtypes(include=[np.number]).columns if c not in int_cols]
+        for col in float_cols:
             df_clean[col] = df_clean[col].astype(str).replace({'nan': None, 'inf': None, '-inf': None})
         
         print(f"   ✅ Data ready: {len(df_clean):,} rows")
@@ -1182,6 +1209,71 @@ class RSCalculatorUltraFast:
             print(f"   ⚠️  Connection error: {e}, reconnecting...")
             self._reconnect()
             time.sleep(2)
+            raise
+
+    def save_bulk_results_with_ibd(self, df):
+        """
+        Atomic save: RS + IBD columns in ONE INSERT.
+        This ensures the row in rs_daily_v2 is COMPLETE from the moment it appears.
+        """
+        if df.empty:
+            return
+        
+        print(f"\n💾 ATOMIC SAVE: Writing {len(df)} rows (RS + IBD) to rs_daily_v2...")
+        
+        # Clean data
+        data = []
+        for _, row in df.iterrows():
+            record = {}
+            for col in df.columns:
+                val = row[col]
+                if pd.isna(val) or val == 'None' or val == 'nan':
+                    record[col] = None
+                else:
+                    record[col] = val
+            data.append(record)
+        
+        # Ensure IBD columns exist in each record (default to None if missing)
+        for record in data:
+            record.setdefault('sector_rs_rating', None)
+            record.setdefault('industry_group_rs_rating', None)
+            record.setdefault('industry_rs_rating', None)
+            record.setdefault('sub_industry_rs_rating', None)
+            record.setdefault('acc_dis_rating', None)
+        
+        stmt = """
+            INSERT INTO rs_daily_v2 
+            (symbol, date, rs_rating, rs_raw, return_3m, return_6m, return_9m, return_12m,
+             rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group,
+             sector_rs_rating, industry_group_rs_rating, industry_rs_rating, sub_industry_rs_rating, acc_dis_rating)
+            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_3m, :return_6m, :return_9m, :return_12m,
+             :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group,
+             :sector_rs_rating, :industry_group_rs_rating, :industry_rs_rating, :sub_industry_rs_rating, :acc_dis_rating)
+            ON CONFLICT (symbol, date) DO UPDATE SET
+            rs_rating = EXCLUDED.rs_rating,
+            rs_raw = EXCLUDED.rs_raw,
+            return_3m = EXCLUDED.return_3m,
+            return_6m = EXCLUDED.return_6m,
+            return_9m = EXCLUDED.return_9m,
+            return_12m = EXCLUDED.return_12m,
+            rank_3m = EXCLUDED.rank_3m,
+            rank_6m = EXCLUDED.rank_6m,
+            rank_9m = EXCLUDED.rank_9m,
+            rank_12m = EXCLUDED.rank_12m,
+            industry_group = EXCLUDED.industry_group,
+            sector_rs_rating = EXCLUDED.sector_rs_rating,
+            industry_group_rs_rating = EXCLUDED.industry_group_rs_rating,
+            industry_rs_rating = EXCLUDED.industry_rs_rating,
+            sub_industry_rs_rating = EXCLUDED.sub_industry_rs_rating,
+            acc_dis_rating = EXCLUDED.acc_dis_rating
+        """
+        
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(stmt), data)
+            print(f"   ✅ ATOMIC SAVE complete: {len(data)} rows with RS + IBD.")
+        except Exception as e:
+            print(f"   ❌ ATOMIC SAVE error: {e}")
             raise
 
     def _retry_with_smaller_chunks(self, df):

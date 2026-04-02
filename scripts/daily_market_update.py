@@ -69,7 +69,18 @@ def update_daily(target_date_str=None):
     try:
         logger.info(f"🚀 Starting Daily Market Update...")
         
-        # 0. Load Mappings
+        # 0. Set Update Status to Updating
+        from sqlalchemy import text
+        import datetime as dt_module
+        db.execute(text("""
+            UPDATE update_status 
+            SET is_updating = TRUE, 
+                started_at = :now 
+            WHERE id = 1
+        """), {"now": dt_module.datetime.utcnow()})
+        db.commit()
+        
+        # 0.5 Load Mappings
         hierarchy_map = load_full_hierarchy_mapping()
         
         # 1. Determine Date
@@ -110,7 +121,11 @@ def update_daily(target_date_str=None):
                     "high": item.get("Highest", 0.0),
                     "low": item.get("Lowest", 0.0),
                     "close": item.get("Close", 0.0),
-                    "change": item.get("Change", 0.0),
+                    # Derive absolute change from close + change% when scraper doesn't return it directly
+                    "change": item.get("Change") if item.get("Change") is not None else round(
+                        float(item.get("Close", 0) or 0) * float(item.get("Change %", 0) or 0) / 
+                        (100.0 + float(item.get("Change %", 0) or 0)), 4
+                    ),
                     "change_percent": item.get("Change %", 0.0),
                     "volume_traded": int(item.get("Volume Traded", 0)),
                     "value_traded_sar": float(item.get("Value Traded", 0.0)),
@@ -154,69 +169,70 @@ def update_daily(target_date_str=None):
         db.commit()
         logger.info(f"✅ Successfully saved/updated {success_count} price records for {market_date}.")
         
-        # 4. RS Calculation (Optimized Final)
+        # 4. RS Calculation (Optimized Final) — CALCULATE ONLY, DO NOT SAVE YET
         # -------------------------------------------------------------------
-        logger.info("🧮 Starting RS Calculation (Incremental Mode)...")
+        logger.info(f"🧮 Starting RS Calculation for {market_date} (Daily Single-Day Mode)...")
+        from scripts.calculate_rs_final_precise import RSCalculatorUltraFast
+        import pandas as pd
         
-        # Use the UltraFast Vectorized Calculator
-        # calculate_full_history_optimized returns a DataFrame of ALL calcs
         calculator = RSCalculatorUltraFast(str(settings.DATABASE_URL))
-        df_all_results = calculator.calculate_full_history_optimized()
+        results = calculator.calculate_daily_rs_ultrafast(market_date)
+        df_rs_today = None
         
-        if df_all_results is not None and not df_all_results.empty:
-            # FILTER: Keep only records for the target market_date
-            # Ensure date column is properly typed for filtering
-            df_all_results['date'] = pd.to_datetime(df_all_results['date']).dt.date
-            
-            df_today = df_all_results[df_all_results['date'] == market_date]
-            
-            if not df_today.empty:
-                logger.info(f"💾 Saving {len(df_today)} RS records for {market_date}...")
-                
-                # SAVE (Append)
-                calculator.save_bulk_results(df_today)
-                logger.info(f"✅ Calculated and saved RS Data for {market_date}.")
-            else:
-                logger.warning(f"⚠️ No RS results found for {market_date}. Check if prices were saved correctly.")
+        if results and len(results) > 0:
+            df_rs_today = pd.DataFrame(results)
+            logger.info(f"✅ Calculated RS for {len(df_rs_today)} stocks (held in memory, not saved yet).")
         else:
-             logger.error("❌ Calculation returned no results.")
-             
-        # 5. Calculate Technical Indicators
+            logger.warning(f"⚠️ No RS results found for {market_date}.")
+            
+        # 5. Calculate Technical Indicators — ATOMIC: only save prices.change, keep tech data in memory
         # -------------------------------------------------------------------
         logger.info("🧮 Calculating Technical Indicators (SMAs, 52W High/Low)...")
         from scripts.calculate_technicals import TechnicalCalculator
         tech_calc = TechnicalCalculator(str(settings.DATABASE_URL))
         df_tech = tech_calc.load_data()
         df_tech_res = tech_calc.calculate(df_tech)
-        tech_calc.save_latest(df_tech_res)
-        logger.info("✅ Technical Indicators Updated.")
+        # Save ONLY prices.change, return tech data as dict for later merging
+        tech_map = tech_calc.save_change_only_and_return_tech_map(df_tech_res)
+        logger.info(f"✅ Technical Indicators calculated (held in memory: {len(tech_map)} stocks).")
 
-        # 6. Calculate IBD Metrics (RS Ratings & Acc/Dis)
+        # 6. Calculate IBD Metrics (Group RS, Acc/Dis) — CALCULATE ONLY
         # -------------------------------------------------------------------
         logger.info("📊 Calculating IBD Metrics (Group RS, Acc/Dis)...")
         from scripts.calculate_ibd_metrics import IBDMetricsCalculator
         
         ibd_calc = IBDMetricsCalculator(db)
-        # Load enough history (approx 7 months)
         df_ibd_prices = ibd_calc.load_data(lookback_days=230)
         
+        group_rs_map = {}
+        acc_dis_map = {}
+        
         if not df_ibd_prices.empty:
-            # Determine target date (ensure we don't calculate for future if data is missing)
-            # Use market_date as the target
-            
-            # calculate_group_rs and calculate_acc_dis expect a datetime object or date string
-            # Let's verify what they expect. The script converts to pd.to_datetime inside.
-            
-            group_rs_map = ibd_calc.calculate_group_rs(df_ibd_prices, market_date)
-            acc_dis_map = ibd_calc.calculate_acc_dis(df_ibd_prices, market_date)
-            
-            if group_rs_map or acc_dis_map:
-                ibd_calc.save_results(group_rs_map, acc_dis_map, market_date)
-                logger.info("✅ IBD Metrics Updated.")
-            else:
-                 logger.warning("⚠️ No IBD results generated.")
+            group_rs_map = ibd_calc.calculate_group_rs(df_ibd_prices, market_date) or {}
+            acc_dis_map = ibd_calc.calculate_acc_dis(df_ibd_prices, market_date) or {}
+            logger.info(f"✅ Calculated IBD Metrics: {len(group_rs_map)} group RS, {len(acc_dis_map)} Acc/Dis.")
         else:
             logger.warning("⚠️ No price data found for IBD Metrics.")
+
+        # 6.5 ATOMIC SAVE: Merge RS + IBD → Save to rs_daily_v2 in ONE shot
+        # -------------------------------------------------------------------
+        if df_rs_today is not None and len(df_rs_today) > 0:
+            logger.info("💾 Merging RS + IBD data and saving atomically to rs_daily_v2...")
+            
+            # Add IBD columns to the RS DataFrame before saving
+            for idx, row in df_rs_today.iterrows():
+                sym = row.get('symbol')
+                if sym:
+                    grp = group_rs_map.get(sym, {})
+                    df_rs_today.at[idx, 'sector_rs_rating'] = grp.get('sector_rs_rating')
+                    df_rs_today.at[idx, 'industry_group_rs_rating'] = grp.get('industry_group_rs_rating')
+                    df_rs_today.at[idx, 'industry_rs_rating'] = grp.get('industry_rs_rating')
+                    df_rs_today.at[idx, 'sub_industry_rs_rating'] = grp.get('sub_industry_rs_rating')
+                    df_rs_today.at[idx, 'acc_dis_rating'] = acc_dis_map.get(sym)
+            
+            # Now save everything at once — the row is COMPLETE from the start
+            calculator.save_bulk_results_with_ibd(df_rs_today)
+            logger.info(f"✅ RS + IBD Data saved atomically for {market_date} ({len(df_rs_today)} stocks).")
 
         # 7. Calculate Industry Group Metrics
         # -------------------------------------------------------------------
@@ -247,19 +263,37 @@ def update_daily(target_date_str=None):
         else:
             logger.warning("⚠️ No group indices found for Industry Group Metrics calculation.")
         
-        # 8. Calculate and Store Stock Technical Indicators
+        # 8. Calculate and Store Stock Technical Indicators — ATOMIC with tech_map
         # -------------------------------------------------------------------
-        logger.info("📈 Calculating and Storing Stock Technical Indicators...")
+        logger.info("📈 Calculating and Storing Stock Technical Indicators (with merged SMAs)...")
         from scripts.calculate_stock_indicators import calculate_and_store_indicators
         
-        processed, errors, successful = calculate_and_store_indicators(db, market_date)
+        processed, errors, successful = calculate_and_store_indicators(db, market_date, tech_map=tech_map)
         logger.info(f"✅ Stock Indicators Updated (Processed: {processed}, Successful: {successful}, Errors: {errors})")
         
-        logger.info("🎉 Daily Update Workflow Completed Successfully!")
+        # 8.5 Calculate Daily Market Breadth — ATOMIC
+        # -------------------------------------------------------------------
+        from scripts.update_daily_market_breadth import update_todays_market_breadth
+        update_todays_market_breadth(db, market_date)
+
+        # 9. Finalize Update Status (Atomic Switch)
+        # -------------------------------------------------------------------
+        db.execute(text("""
+            UPDATE update_status 
+            SET latest_ready_date = :market_date, 
+                is_updating = FALSE, 
+                completed_at = :now 
+            WHERE id = 1
+        """), {"market_date": market_date, "now": dt_module.datetime.utcnow()})
+        db.commit()
+
+        logger.info("🎉 Daily Update Workflow Completed Successfully! New data is now live.")
 
     except Exception as e:
         logger.error(f"❌ Critical Error in Daily Update: {e}")
-        # No rollback here for the scrape part as it was committed above
+        # Release the lock if it fails
+        db.execute(text("UPDATE update_status SET is_updating = FALSE WHERE id = 1"))
+        db.commit()
     finally:
         db.close()
 

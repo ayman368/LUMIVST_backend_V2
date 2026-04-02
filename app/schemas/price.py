@@ -26,6 +26,9 @@ class PriceResponse(BaseModel):
     value_traded_sar: Optional[Decimal] = None
     no_of_trades: Optional[int] = None
     market_cap: Optional[Decimal] = None
+    approval_with_controls: Optional[str] = None
+    purge_amount: Optional[Decimal] = None
+    marginable_percent: Optional[Decimal] = None
     trading_view_symbol: Optional[str] = None
 
     created_at: Optional[datetime] = None

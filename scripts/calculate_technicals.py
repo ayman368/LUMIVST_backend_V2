@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
 import logging
+import requests
 
 # إضافة المسار للمجلد الرئيسي للوصول للإعدادات
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -58,6 +59,7 @@ class TechnicalCalculator:
             'percent_change_15d':   'NUMERIC(14, 4)',
             'percent_change_20d':   'NUMERIC(14, 4)',
             'percent_change_126d':  'NUMERIC(14, 4)',
+            'beta':                 'NUMERIC(12, 4)',
         }
 
         for col_name, col_type in columns_to_add.items():
@@ -98,7 +100,7 @@ class TechnicalCalculator:
         grouped = df.groupby('symbol')
 
         # 1. SMAs اليومية
-        for window in [10, 21, 50, 150, 200]:
+        for window in [10, 20, 21, 50, 100, 150, 200]:
             df[f'sma_{window}'] = grouped['close'].transform(
                 lambda x: x.rolling(window=window).mean()
             )
@@ -161,7 +163,7 @@ class TechnicalCalculator:
         df = df.drop(['sma_30w_calc', 'sma_40w_calc', 'week_ending'], axis=1)
 
         # 7. النسب المئوية
-        for window in [10, 21, 50, 150, 200]:
+        for window in [10, 20, 21, 50, 100, 150, 200]:
             col_sma = f'sma_{window}'
             df[f'price_vs_sma_{window}_percent'] = (
                 (df['close'] - df[col_sma]) / df[col_sma].replace(0, np.nan)
@@ -179,6 +181,87 @@ class TechnicalCalculator:
             (df['volume_traded'] - df['average_volume_50']) /
             df['average_volume_50'].replace(0, np.nan)
         ) * 100
+
+        # 8. Beta Calculation vs TASI Benchmark
+        logger.info("   ... حساب Beta (Volatility) vs Benchmark (TASI)")
+        
+        # 8a: Find the Benchmark
+        # Saudi main index is often just "TASI" or "TASI.SR" or "^TASI"
+        tasi_df = df[df['symbol'].isin(['TASI', 'TASI.SR', '^TASI', 'TASI.CM'])]
+        if not tasi_df.empty:
+            market_df = tasi_df.groupby('date')['close'].last().reset_index()
+            market_df.rename(columns={'close': 'market_close'}, inplace=True)
+            logger.info("   ✅ تم العثور على مؤشر TASI في البيانات ليستخدم כـ Benchmark")
+        else:
+            try:
+                logger.info("   🌐 Fetching exact ^TASI.SR data from Yahoo Finance for 1 year...")
+                url = "https://query1.finance.yahoo.com/v8/finance/chart/^TASI.SR?interval=1d&range=1y"
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                res = requests.get(url, headers=headers, timeout=10)
+                data = res.json()
+                
+                result = data.get('chart', {}).get('result')
+                if not result:
+                    raise Exception("Yahoo API returned no data for ^TASI.SR")
+
+                timestamps = result[0].get('timestamp', [])
+                quote = result[0].get('indicators', {}).get('quote', [{}])[0]
+                closes = quote.get('close', [])
+                
+                dates = []
+                clean_closes = []
+                for ts, c in zip(timestamps, closes):
+                    if c is not None:
+                        dt = pd.to_datetime(ts, unit='s', utc=True).tz_convert('Asia/Riyadh')
+                        dates.append(dt.date())
+                        clean_closes.append(c)
+                        
+                meta = result[0].get('meta', {})
+                latest_time = meta.get('regularMarketTime')
+                latest_close = meta.get('regularMarketPrice')
+                
+                if latest_time is not None and latest_close is not None:
+                    dt_latest = pd.to_datetime(latest_time, unit='s', utc=True).tz_convert('Asia/Riyadh').date()
+                    if dt_latest not in dates:
+                        logger.info(f"   ⚡ Fixing Yahoo Delay: Appending real-time today's data from Meta -> {dt_latest}")
+                        dates.append(dt_latest)
+                        clean_closes.append(latest_close)
+
+                market_df = pd.DataFrame({'date': dates, 'market_close': clean_closes})
+                market_df['date'] = pd.to_datetime(market_df['date'])
+                logger.info(f"   ✅ تم تحميل بيانات TASI الفعلية من Yahoo بنجاح (آخر تاريخ: {market_df['date'].max().date()}).")
+            except Exception as e:
+                logger.error(f"   ❌ فشل سحب TASI من Yahoo: {e}")
+                # Fallback: using equal-weighted market average
+                market_df = df.groupby('date')['close'].mean().reset_index()
+                market_df.rename(columns={'close': 'market_close'}, inplace=True)
+                logger.info("   ⚠️ لم يتم العثور على مؤشر TASI صريح، تم حساب المؤشر العام تلقائياً")
+
+        # Sort values properly for pct_change and rolling arithmetic
+        df = df.sort_values(['symbol', 'date']).reset_index(drop=True)
+        market_df = market_df.sort_values('date').reset_index(drop=True)
+
+        df['stock_return'] = df.groupby('symbol')['close'].pct_change()
+        market_df['market_return'] = market_df['market_close'].pct_change()
+        # Compute market variance (same for all stocks on a given date)
+        market_df['market_var'] = market_df['market_return'].rolling(window=260, min_periods=130).var()
+
+        # Merge daily market data into df to align rows perfectly
+        df = df.merge(market_df[['date', 'market_return', 'market_var']], on='date', how='left')
+
+        # Compute stock covariance vs market
+        def compute_covariance(sub_df):
+            # sub_df maintains its original index from df, ensuring alignement
+            return sub_df['stock_return'].rolling(window=260, min_periods=130).cov(sub_df['market_return'])
+
+        df['cov_stock_market'] = df.groupby('symbol', group_keys=False).apply(compute_covariance)
+        
+        # Compute Beta
+        df['beta'] = df['cov_stock_market'] / df['market_var']
+        df['beta'] = df['beta'].replace([np.inf, -np.inf], np.nan)
+        
+        # Clean up temporary columns
+        df.drop(['stock_return', 'market_return', 'market_var', 'cov_stock_market'], axis=1, inplace=True)
 
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         return df
@@ -258,6 +341,7 @@ class TechnicalCalculator:
                         'pct_chg_15d':  fv('percent_change_15d'),
                         'pct_chg_20d':  fv('percent_change_20d'),
                         'pct_chg_126d': fv('percent_change_126d'),
+                        'beta':         fv('beta'),
                     }
 
                     conn.execute(text("""
@@ -272,7 +356,7 @@ class TechnicalCalculator:
                             price_vs_sma_10_percent, price_vs_sma_21_percent, price_vs_sma_50_percent,
                             price_vs_sma_150_percent, price_vs_sma_200_percent,
                             percent_off_52w_high, percent_off_52w_low, vol_diff_50_percent,
-                            percent_change_15d, percent_change_20d, percent_change_126d
+                            percent_change_15d, percent_change_20d, percent_change_126d, beta
                         ) VALUES (
                             :symbol, :date,
                             :sma_10, :sma_21, :sma_50, :sma_150, :sma_200,
@@ -282,7 +366,7 @@ class TechnicalCalculator:
                             :pm10, :pm21, :pm50, :pm150, :pm200,
                             :p10_pct, :p21_pct, :p50_pct, :p150_pct, :p200_pct,
                             :pct_off_high, :pct_off_low, :vol_diff,
-                            :pct_chg_15d, :pct_chg_20d, :pct_chg_126d
+                            :pct_chg_15d, :pct_chg_20d, :pct_chg_126d, :beta
                         )
                         ON CONFLICT (symbol, date) DO UPDATE SET
                             sma_10  = EXCLUDED.sma_10,
@@ -315,7 +399,8 @@ class TechnicalCalculator:
                             vol_diff_50_percent  = EXCLUDED.vol_diff_50_percent,
                             percent_change_15d   = EXCLUDED.percent_change_15d,
                             percent_change_20d   = EXCLUDED.percent_change_20d,
-                            percent_change_126d  = EXCLUDED.percent_change_126d
+                            percent_change_126d  = EXCLUDED.percent_change_126d,
+                            beta                 = EXCLUDED.beta
                     """), si_params)
 
                 trans.commit()
@@ -324,6 +409,99 @@ class TechnicalCalculator:
                 trans.rollback()
                 logger.error(f"❌ خطأ أثناء التحديث: {e}")
                 raise
+
+    def save_change_only_and_return_tech_map(self, df):
+        """
+        Atomic Pipeline Mode:
+          1. Updates ONLY the 'change' column in prices table
+          2. Returns a dict of {symbol: {sma_10: x, sma_50: y, ...}} for later merging
+          3. Does NOT write to stock_indicators (that happens later in one atomic shot)
+        """
+        logger.info("💾 جاري تحضير البيانات (Atomic Mode - prices.change فقط)...")
+
+        latest_dates = df.groupby('symbol')['date'].max().reset_index()
+        latest_data = pd.merge(df, latest_dates, on=['symbol', 'date'])
+
+        logger.info(f"🚀 جاري تحديث change لـ {len(latest_data)} سهم...")
+
+        # 1. Update prices.change only
+        with self.engine.connect() as conn:
+            trans = conn.begin()
+            try:
+                for idx, row in latest_data.iterrows():
+                    conn.execute(
+                        text("UPDATE prices SET change = :change WHERE id = :id"),
+                        {
+                            'change': round(float(row['change']), 2) if pd.notnull(row['change']) else None,
+                            'id': int(row['id'])
+                        }
+                    )
+                trans.commit()
+                logger.info("✅ تم تحديث change في prices بنجاح.")
+            except Exception as e:
+                trans.rollback()
+                logger.error(f"❌ خطأ أثناء تحديث prices.change: {e}")
+                raise
+
+        # 2. Build tech_map: {symbol: {col: value, ...}}
+        tech_map = {}
+        for idx, row in latest_data.iterrows():
+            symbol = row['symbol']
+            rec_date = row['date'].date() if hasattr(row['date'], 'date') else row['date']
+
+            def fv(key):
+                val = row.get(key)
+                return float(val) if val is not None and pd.notnull(val) else None
+
+            def pm(a, b):
+                va, vb = row.get(a), row.get(b)
+                return float(va - vb) if va is not None and vb is not None \
+                       and pd.notnull(va) and pd.notnull(vb) else None
+
+            tech_map[symbol] = {
+                'date': rec_date,
+                'sma_10': fv('sma_10'),
+                'sma_20': fv('sma_20'),
+                'sma_21': fv('sma_21'),
+                'sma_50': fv('sma_50'),
+                'sma_100': fv('sma_100'),
+                'sma_150': fv('sma_150'),
+                'sma_200': fv('sma_200'),
+                'sma_200_1m_ago': fv('sma_200_1m_ago'),
+                'sma_200_2m_ago': fv('sma_200_2m_ago'),
+                'sma_200_3m_ago': fv('sma_200_3m_ago'),
+                'sma_200_4m_ago': fv('sma_200_4m_ago'),
+                'sma_200_5m_ago': fv('sma_200_5m_ago'),
+                'sma_30w': fv('sma_30w'),
+                'sma_40w': fv('sma_40w'),
+                'fifty_two_week_high': fv('fifty_two_week_high'),
+                'fifty_two_week_low': fv('fifty_two_week_low'),
+                'average_volume_50': fv('average_volume_50'),
+                'price_minus_sma_10': pm('close', 'sma_10'),
+                'price_minus_sma_20': pm('close', 'sma_20'),
+                'price_minus_sma_21': pm('close', 'sma_21'),
+                'price_minus_sma_50': pm('close', 'sma_50'),
+                'price_minus_sma_100': pm('close', 'sma_100'),
+                'price_minus_sma_150': pm('close', 'sma_150'),
+                'price_minus_sma_200': pm('close', 'sma_200'),
+                'price_vs_sma_10_percent': fv('price_vs_sma_10_percent'),
+                'price_vs_sma_20_percent': fv('price_vs_sma_20_percent'),
+                'price_vs_sma_21_percent': fv('price_vs_sma_21_percent'),
+                'price_vs_sma_50_percent': fv('price_vs_sma_50_percent'),
+                'price_vs_sma_100_percent': fv('price_vs_sma_100_percent'),
+                'price_vs_sma_150_percent': fv('price_vs_sma_150_percent'),
+                'price_vs_sma_200_percent': fv('price_vs_sma_200_percent'),
+                'percent_off_52w_high': fv('percent_off_52w_high'),
+                'percent_off_52w_low': fv('percent_off_52w_low'),
+                'vol_diff_50_percent': fv('vol_diff_50_percent'),
+                'percent_change_15d': fv('percent_change_15d'),
+                'percent_change_20d': fv('percent_change_20d'),
+                'percent_change_126d': fv('percent_change_126d'),
+                'beta': fv('beta'),
+            }
+
+        logger.info(f"✅ تم تجهيز بيانات المؤشرات الفنية لـ {len(tech_map)} سهم (في الذاكرة).")
+        return tech_map
 
 
 if __name__ == "__main__":

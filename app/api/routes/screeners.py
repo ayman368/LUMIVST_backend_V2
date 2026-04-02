@@ -59,6 +59,7 @@ def screener_to_dict(ind: StockIndicator, rs_rating=None) -> dict:
         'cci': safe_float(ind.cci),
         'aroon_up': safe_float(ind.aroon_up),
         'aroon_down': safe_float(ind.aroon_down),
+        'beta': safe_float(ind.beta),
 
         # ============ Historical 200MA ============
         'sma_200_1m_ago': safe_float(ind.sma_200_1m_ago),
