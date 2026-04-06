@@ -116,9 +116,24 @@ def get_industry_group_stocks(
             period = target_dates_map[record.date]
             rs_lookup[record.symbol][period] = record.rs_rating
 
+    # Fetch Static Info
+    from app.models.static_stock_info import StaticStockInfo
+    static_rows = db.query(StaticStockInfo).filter(StaticStockInfo.symbol.in_(stock_symbols)).all()
+    static_map = {row.symbol: row for row in static_rows}
+
     # 4. Merge Data
     result = []
     for stock in stocks:
+        s_info = static_map.get(stock.symbol)
+        if s_info:
+            stock.approval_with_controls = s_info.approval_with_controls
+            stock.purge_amount = s_info.purge_amount
+            stock.marginable_percent = s_info.marginable_percent
+        else:
+            stock.approval_with_controls = None
+            stock.purge_amount = None
+            stock.marginable_percent = None
+
         # Pydantic model from ORM object
         stock_data = IndustryGroupStockResponse.from_orm(stock)
         

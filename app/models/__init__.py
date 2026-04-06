@@ -10,3 +10,10 @@ from app.models.financial_metric_categories import FinancialMetricCategory
 from app.models.company_metric_display_settings import CompanyMetricDisplaySetting
 from app.models.update_status import UpdateStatus
 from app.models.static_stock_info import StaticStockInfo
+from app.models.market_reports import (
+    SubstantialShareholder,
+    NetShortPosition,
+    ForeignHeadroom,
+    ShareBuyback,
+    SBLPosition,
+)
