@@ -61,3 +61,17 @@ class SBLPositionResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+class HistoricalReportResponse(BaseModel):
+    id: int
+    report_date: date
+    open_price: Optional[str]
+    high_price: Optional[str]
+    low_price: Optional[str]
+    close_price: Optional[str]
+    volume_traded: Optional[str]
+    value_traded: Optional[str]
+    no_of_trades: Optional[str]
+    
+    class Config:
+        from_attributes = True

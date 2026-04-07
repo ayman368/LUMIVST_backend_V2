@@ -1,38 +1,120 @@
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.auth import *
+from app.api.deps import get_current_user as require_current_user
 from app.models.user import User
 from app.schemas.auth import *
-from app.core.redis import store_reset_token, get_reset_token, delete_reset_token, store_verification_token, get_verification_token, delete_verification_token
+from app.core.redis import redis_cache, store_verification_token, get_verification_token, delete_verification_token
 from app.services.email_service import send_email
 from app.core.config import settings
 import uuid
-import traceback
+import logging
+import re
+import secrets
+import hashlib
+import base64
+import asyncio
+from urllib.parse import urlencode
 from app.core.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+logger = logging.getLogger(__name__)
 
-@router.post("/register", response_model=Token, status_code=status.HTTP_201_CREATED)
+
+def validate_password_strength(password: str):
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
+    if not re.search(r"[A-Z]", password):
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على حرف كبير واحد على الأقل")
+    if not re.search(r"[a-z]", password):
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على حرف صغير واحد على الأقل")
+    if not re.search(r"\d", password):
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على رقم واحد على الأقل")
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على رمز خاص واحد على الأقل")
+
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    is_secure = settings.ENVIRONMENT.lower() == "production"
+    response.set_cookie(
+        key="session_token",
+        value=access_token,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        path="/",
+    )
+
+
+def clear_auth_cookies(response: Response):
+    response.delete_cookie("session_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    response.delete_cookie("pending_token", path="/")
+
+
+def set_pending_cookie(response: Response, pending_token: str):
+    is_secure = settings.ENVIRONMENT.lower() == "production"
+    response.set_cookie(
+        key="pending_token",
+        value=pending_token,
+        httponly=True,
+        secure=is_secure,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
+
+async def create_and_store_tokens(user: User):
+    access_token = create_access_token(
+        data={"sub": str(user.id), "email": user.email, "is_approved": user.is_approved, "is_admin": user.is_admin}
+    )
+    refresh_token = create_refresh_token(data={"sub": str(user.id), "email": user.email})
+    await store_token_in_redis(user.id, access_token)
+    await store_refresh_token_in_redis(user.id, refresh_token)
+    return access_token, refresh_token
+
+
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+async def create_oauth_state(provider: str):
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(64)
+    await redis_cache.set(f"oauth_state:{provider}:{state}", verifier, expire=600)
+    return state, verifier
+
+
+async def consume_oauth_state(provider: str, state: str):
+    key = f"oauth_state:{provider}:{state}"
+    verifier = await redis_cache.get(key)
+    if verifier:
+        await redis_cache.delete(key)
+    return verifier
+
+@router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register(user: UserRegister, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     # التحقق من وجود المستخدم
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجل بالفعل")
     
-    import re
-    # التحقق من قوة كلمة المرور (OWASP)
-    if len(user.password) < 8:
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
-    if not re.search(r"[A-Z]", user.password):
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على حرف كبير واحد على الأقل")
-    if not re.search(r"[a-z]", user.password):
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على حرف صغير واحد على الأقل")
-    if not re.search(r"\d", user.password):
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على رقم واحد على الأقل")
-    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", user.password):
-        raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تحتوي على رمز خاص واحد على الأقل")
+    validate_password_strength(user.password)
     
     
     # إنشاء المستخدم
@@ -48,18 +130,6 @@ async def register(user: UserRegister, background_tasks: BackgroundTasks, db: Se
     db.commit()
     db.refresh(db_user)
     
-    # إنشاء وتخزين التوكن
-    access_token = create_access_token(data={
-        "sub": str(db_user.id), 
-        "email": db_user.email,
-        "is_approved": db_user.is_approved,
-        "is_admin": db_user.is_admin
-    })
-    try:
-        await store_token_in_redis(db_user.id, access_token)
-    except Exception as e:
-        print(f"⚠️ Redis error during register: {e}")
-
     # Send Verification Email
     try:
         verification_token = str(uuid.uuid4())
@@ -78,37 +148,47 @@ async def register(user: UserRegister, background_tasks: BackgroundTasks, db: Se
     except Exception as e:
         print(f"⚠️ Failed to queue verification email: {e}")
     
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"message": "تم إنشاء الحساب بنجاح. الحساب بانتظار موافقة الإدارة وتأكيد البريد الإلكتروني."}
 
 @router.post("/refresh-token")
-async def refresh_token(token: str = Depends(verify_token), db: Session = Depends(get_db)):
-    """
-    Issue a new token with updated claims from the database.
-    Useful when user's approval status changes and they need updated token.
-    """
-    payload = decode_token(token)
-    user_id = int(payload.get("sub"))
-    
+async def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
+    refresh_token = request.cookies.get("refresh_token")
+    user_id = None
+    token_jti = None
+
+    if refresh_token:
+        payload = decode_token(refresh_token)
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token type")
+
+        user_id = int(payload.get("sub"))
+        token_jti = payload.get("jti")
+        if not await verify_refresh_token_exists(user_id, refresh_token):
+            raise HTTPException(status_code=401, detail="Refresh token expired or revoked")
+    else:
+        # Backward-compatible fallback for pending-approval flow using bearer access token.
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Refresh token missing")
+        access_token = auth_header.split(" ", 1)[1].strip()
+        payload = decode_token(access_token)
+        user_id = int(payload.get("sub"))
+        if not await verify_token_exists(user_id, access_token):
+            raise HTTPException(status_code=401, detail="Access token expired or revoked")
+
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    # Create new token with FRESH data from DB
-    new_token = create_access_token(data={
-        "sub": str(user.id),
-        "email": user.email,
-        "is_approved": user.is_approved,
-        "is_admin": user.is_admin
-    })
-    
-    # Store new token in Redis
-    try:
-        await store_token_in_redis(user.id, new_token)
-    except Exception as e:
-        print(f"⚠️ Redis error during token refresh: {e}")
-    
+    if not user.is_approved:
+        raise HTTPException(status_code=403, detail="Account pending admin approval")
+
+    if token_jti:
+        await invalidate_refresh_token(user_id, token_jti)
+    access_token, new_refresh_token = await create_and_store_tokens(user)
+    set_auth_cookies(response, access_token, new_refresh_token)
+
     return {
-        "access_token": new_token,
+        "access_token": access_token,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -116,29 +196,26 @@ async def refresh_token(token: str = Depends(verify_token), db: Session = Depend
             "full_name": user.full_name,
             "is_verified": user.is_verified,
             "is_approved": user.is_approved,
-            "is_admin": user.is_admin
-        }
+            "is_admin": user.is_admin,
+        },
     }
-
-from fastapi import Request
 
 @router.post("/login")
 @limiter.limit("5/minute")
-async def login(request: Request, user: UserLogin, db: Session = Depends(get_db)):
+async def login(request: Request, response: Response, user: UserLogin, db: Session = Depends(get_db)):
     # Rate limiting handled by decorator
     
     try:
         db_user = db.query(User).filter(User.email == user.email).first()
         if not db_user:
-            raise HTTPException(status_code=404, detail="الحساب غير موجود")
+            raise HTTPException(status_code=401, detail="بيانات الدخول غير صحيحة")
             
         # Check Account Lockout (Optional Implementation)
         if db_user.is_locked:
              raise HTTPException(status_code=403, detail="تم قفل الحساب. يرجى الاتصال بالدعم.")
         
         if not verify_password(user.password, db_user.hashed_password):
-            # Increment failed attempts logic could go here
-            raise HTTPException(status_code=401, detail="كلمة المرور غير صحيحة")
+            raise HTTPException(status_code=401, detail="بيانات الدخول غير صحيحة")
             
         # ✅ Check Approval Status
         if not db_user.is_approved:
@@ -147,19 +224,8 @@ async def login(request: Request, user: UserLogin, db: Session = Depends(get_db)
                 detail="الحساب بانتظار موافقة الإدارة. سيتم إشعارك عند التفعيل."
             )
         
-        access_token = create_access_token(data={
-            "sub": str(db_user.id), 
-            "email": db_user.email,
-            "is_approved": db_user.is_approved,
-            "is_admin": db_user.is_admin
-        })
-        
-        # Store token in Redis (safely)
-        try:
-            await store_token_in_redis(db_user.id, access_token)
-        except Exception as e:
-            print(f"⚠️ Redis error during login: {e}")
-            # Continue even if Redis fails
+        access_token, refresh_token = await create_and_store_tokens(db_user)
+        set_auth_cookies(response, access_token, refresh_token)
         
         return {
             "access_token": access_token, 
@@ -175,14 +241,31 @@ async def login(request: Request, user: UserLogin, db: Session = Depends(get_db)
         }
     except HTTPException:
         raise
-    except Exception as e:
-        traceback.print_exc()
-        print(f"❌ Login error: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    except Exception:
+        logger.exception("Unexpected login error")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/logout")
-async def logout(user_id: int, token: str = Depends(verify_token)):
-    await invalidate_token(user_id)
+async def logout(
+    request: Request,
+    response: Response,
+    token: str = Depends(verify_token),
+    current_user: User = Depends(require_current_user),
+):
+    payload = decode_token(token)
+    access_jti = payload.get("jti")
+    if access_jti:
+        await invalidate_token(current_user.id, access_jti)
+    else:
+        await invalidate_token(current_user.id)
+
+    refresh_token = request.cookies.get("refresh_token")
+    if refresh_token:
+        refresh_payload = decode_token(refresh_token)
+        refresh_jti = refresh_payload.get("jti")
+        if refresh_jti:
+            await invalidate_refresh_token(current_user.id, refresh_jti)
+    clear_auth_cookies(response)
     return {"message": "تم تسجيل الخروج بنجاح"}
 
 @router.get("/me", response_model=UserResponse)
@@ -198,11 +281,12 @@ async def get_current_user(token: str = Depends(verify_token), db: Session = Dep
     return user
 
 @router.put("/profile", response_model=UserResponse)
-async def update_profile(user_update: UserUpdate, token: str = Depends(verify_token), db: Session = Depends(get_db)):
-    payload = decode_token(token)
-    user_id = int(payload.get("sub"))
-    
-    db_user = db.query(User).filter(User.id == user_id).first()
+async def update_profile(
+    user_update: UserUpdate,
+    current_user: User = Depends(require_current_user),
+    db: Session = Depends(get_db),
+):
+    db_user = db.query(User).filter(User.id == current_user.id).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود")
         
@@ -219,7 +303,7 @@ async def update_profile(user_update: UserUpdate, token: str = Depends(verify_to
 
         # Check if email is taken by another user
         existing_user = db.query(User).filter(User.email == user_update.email).first()
-        if existing_user and existing_user.id != user_id:
+        if existing_user and existing_user.id != current_user.id:
             raise HTTPException(status_code=400, detail="البريد الإلكتروني مستخدم بالفعل")
         db_user.email = user_update.email
         db_user.is_verified = False # Reset verification status if email changes
@@ -236,11 +320,12 @@ async def update_profile(user_update: UserUpdate, token: str = Depends(verify_to
     return db_user
 
 @router.delete("/delete-account")
-async def delete_account(token: str = Depends(verify_token), db: Session = Depends(get_db)):
-    payload = decode_token(token)
-    user_id = int(payload.get("sub"))
-    
-    db_user = db.query(User).filter(User.id == user_id).first()
+async def delete_account(
+    response: Response,
+    current_user: User = Depends(require_current_user),
+    db: Session = Depends(get_db),
+):
+    db_user = db.query(User).filter(User.id == current_user.id).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود")
     
@@ -249,7 +334,9 @@ async def delete_account(token: str = Depends(verify_token), db: Session = Depen
     db.commit()
     
     # Invalidate token
-    await invalidate_token(user_id)
+    await invalidate_token(current_user.id)
+    await invalidate_refresh_token(current_user.id)
+    clear_auth_cookies(response)
     
     return {"message": "تم حذف الحساب بنجاح"}
 
@@ -291,6 +378,8 @@ async def forget_password(request: ForgetPasswordRequest, background_tasks: Back
 
 @router.post("/reset-password")
 async def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    validate_password_strength(request.password)
+
     # 1. Hash incoming token
     incoming_token_hash = hash_token(request.token)
     
@@ -315,6 +404,32 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
     
     return {"message": "تم تغيير كلمة المرور بنجاح"}
 
+
+@router.get("/pending-status/stream")
+async def pending_status_stream(request: Request, db: Session = Depends(get_db)):
+    pending_token = request.cookies.get("pending_token")
+    if not pending_token:
+        raise HTTPException(status_code=401, detail="Pending token missing")
+
+    payload = decode_token(pending_token)
+    if payload.get("scope") != "check_approval_only":
+        raise HTTPException(status_code=401, detail="Invalid pending token scope")
+
+    user_id = int(payload.get("sub"))
+    if not await verify_token_exists(user_id, pending_token):
+        raise HTTPException(status_code=401, detail="Pending token expired")
+
+    async def event_generator():
+        while True:
+            user = db.query(User).filter(User.id == user_id).first()
+            approved = bool(user and user.is_approved)
+            yield f"data: {{\"approved\": {str(approved).lower()}}}\n\n"
+            if approved:
+                break
+            await asyncio.sleep(10)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 @router.get("/verify-email")
 async def verify_email(token: str, db: Session = Depends(get_db)):
     user_id = await get_verification_token(token)
@@ -337,16 +452,30 @@ import httpx
 @router.get("/google/login")
 async def google_login():
     redirect_uri = f"{settings.FRONTEND_URL}/auth/callback/google"
+    state, verifier = await create_oauth_state("google")
+    challenge = _pkce_challenge(verifier)
+    params = {
+        "response_type": "code",
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": "openid email profile",
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
     return {
-        "url": f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={settings.GOOGLE_CLIENT_ID}&redirect_uri={redirect_uri}&scope=openid%20email%20profile"
+        "url": f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
     }
 
 @router.post("/google/callback")
-async def google_callback(code: str, db: Session = Depends(get_db)):
+async def google_callback(code: str, state: str, response: Response, db: Session = Depends(get_db)):
     try:
+        verifier = await consume_oauth_state("google", state)
+        if not verifier:
+            raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
         # Check if Google credentials are configured
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
-            print("❌ Google credentials not configured (GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET missing)")
             raise HTTPException(status_code=500, detail="Google OAuth configuration is missing")
             
         token_url = "https://oauth2.googleapis.com/token"
@@ -357,6 +486,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
+            "code_verifier": verifier,
         }
         
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -365,14 +495,12 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
             
         if "error" in token_data:
             error_msg = token_data.get("error_description", token_data.get("error", "Google Login Failed"))
-            print(f"❌ Google Token Error: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
             
         id_token = token_data.get("id_token")
         access_token_from_google = token_data.get("access_token")
         
         if not access_token_from_google:
-            print(f"❌ No access token from Google: {token_data}")
             raise HTTPException(status_code=400, detail="لم يتم الحصول على رمز الولوج من Google")
         
         # Get user info
@@ -382,14 +510,12 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
             
         if response.status_code != 200:
             error_msg = user_info.get("error_description", "Failed to get user info from Google")
-            print(f"❌ Google User Info Error: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
         
         email = user_info.get("email")
         name = user_info.get("name")
         
         if not email:
-            print("❌ Email not provided by Google")
             raise HTTPException(status_code=400, detail="لم تقدم Google بريدك الإلكتروني")
         
         # Find or create user
@@ -412,7 +538,6 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         # If the account is not yet approved by an admin, return 403 with user info
         # Frontend will show pending approval page and poll for approval
         if not user.is_approved:
-            print(f"⏳ Account pending approval for {user.email}")
             # Create a temporary JWT just for checking approval status (not for API access)
             # This is limited-scope token to verify approval status
             temp_token = create_access_token(data={
@@ -422,9 +547,9 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
                 "is_admin": False,
                 "scope": "check_approval_only"
             })
+            await store_token_in_redis(user.id, temp_token)
             # Return 403 but with user info so frontend can poll for approval
-            from fastapi.responses import JSONResponse
-            return JSONResponse(
+            pending_response = JSONResponse(
                 status_code=403,
                 content={
                     "detail": "الحساب بانتظار موافقة الإدارة. سيتم إشعارك عند التفعيل.",
@@ -439,15 +564,13 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
                     "temp_token": temp_token  # Limited token for checking status
                 }
             )
+            set_pending_cookie(pending_response, temp_token)
+            return pending_response
+            
 
         # Create JWT for approved users
-        access_token = create_access_token(data={
-            "sub": str(user.id), 
-            "email": user.email,
-            "is_approved": user.is_approved,
-            "is_admin": user.is_admin
-        })
-        await store_token_in_redis(user.id, access_token)
+        access_token, refresh_token = await create_and_store_tokens(user)
+        set_auth_cookies(response, access_token, refresh_token)
 
         return {
             "access_token": access_token,
@@ -463,26 +586,34 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         }
     except HTTPException:
         raise
-    except Exception as e:
-        traceback.print_exc()
-        error_msg = str(e)
-        print(f"❌ Google Callback Error: {error_msg}")
-        raise HTTPException(status_code=500, detail=f"Google Login Error: {error_msg}")
+    except Exception:
+        logger.exception("Google callback failed")
+        raise HTTPException(status_code=500, detail="Google login failed")
 
 # Social Login - Facebook
 @router.get("/facebook/login")
 async def facebook_login():
     redirect_uri = f"{settings.FRONTEND_URL}/auth/callback/facebook"
+    state, _ = await create_oauth_state("facebook")
+    params = {
+        "client_id": settings.FACEBOOK_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": "public_profile,email",
+        "state": state,
+    }
     return {
-        "url": f"https://www.facebook.com/v18.0/dialog/oauth?client_id={settings.FACEBOOK_CLIENT_ID}&redirect_uri={redirect_uri}&scope=public_profile,email"
+        "url": f"https://www.facebook.com/v18.0/dialog/oauth?{urlencode(params)}"
     }
 
 @router.post("/facebook/callback")
-async def facebook_callback(code: str, db: Session = Depends(get_db)):
+async def facebook_callback(code: str, state: str, response: Response, db: Session = Depends(get_db)):
     try:
+        verifier = await consume_oauth_state("facebook", state)
+        if not verifier:
+            raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
         # Check if Facebook credentials are configured
         if not settings.FACEBOOK_CLIENT_ID or not settings.FACEBOOK_CLIENT_SECRET:
-            print("❌ Facebook credentials not configured (FACEBOOK_CLIENT_ID or FACEBOOK_CLIENT_SECRET missing)")
             raise HTTPException(status_code=500, detail="Facebook OAuth configuration is missing")
             
         token_url = "https://graph.facebook.com/v18.0/oauth/access_token"
@@ -500,13 +631,11 @@ async def facebook_callback(code: str, db: Session = Depends(get_db)):
             
         if "error" in token_data:
             error_msg = token_data.get("error", {}).get("message", "Facebook Login Failed")
-            print(f"❌ Facebook Token Error: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
             
         access_token_from_facebook = token_data.get("access_token")
         
         if not access_token_from_facebook:
-            print(f"❌ No access token from Facebook: {token_data}")
             raise HTTPException(status_code=400, detail="لم يتم الحصول على رمز الولوج من Facebook")
         
         # Get user info
@@ -516,14 +645,12 @@ async def facebook_callback(code: str, db: Session = Depends(get_db)):
             
         if "error" in user_info:
             error_msg = user_info.get("error", {}).get("message", "Failed to get user info from Facebook")
-            print(f"❌ Facebook User Info Error: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
         
         email = user_info.get("email")
         name = user_info.get("name")
         
         if not email:
-            print("❌ Email not provided by Facebook")
             raise HTTPException(status_code=400, detail="لم تقدم Facebook بريدك الإلكتروني")
         
         # Find or create user
@@ -546,7 +673,6 @@ async def facebook_callback(code: str, db: Session = Depends(get_db)):
         # If the account is not yet approved by an admin, return 403 with user info
         # Frontend will show pending approval page and poll for approval
         if not user.is_approved:
-            print(f"⏳ Account pending approval for {user.email}")
             # Create a temporary JWT just for checking approval status (not for API access)
             # This is limited-scope token to verify approval status
             temp_token = create_access_token(data={
@@ -556,9 +682,9 @@ async def facebook_callback(code: str, db: Session = Depends(get_db)):
                 "is_admin": False,
                 "scope": "check_approval_only"
             })
+            await store_token_in_redis(user.id, temp_token)
             # Return 403 but with user info so frontend can poll for approval
-            from fastapi.responses import JSONResponse
-            return JSONResponse(
+            pending_response = JSONResponse(
                 status_code=403,
                 content={
                     "detail": "الحساب بانتظار موافقة الإدارة. سيتم إشعارك عند التفعيل.",
@@ -573,15 +699,12 @@ async def facebook_callback(code: str, db: Session = Depends(get_db)):
                     "temp_token": temp_token  # Limited token for checking status
                 }
             )
+            set_pending_cookie(pending_response, temp_token)
+            return pending_response
 
         # Create JWT for approved users
-        jwt_token = create_access_token(data={
-            "sub": str(user.id), 
-            "email": user.email,
-            "is_approved": user.is_approved,
-            "is_admin": user.is_admin
-        })
-        await store_token_in_redis(user.id, jwt_token)
+        jwt_token, refresh_token = await create_and_store_tokens(user)
+        set_auth_cookies(response, jwt_token, refresh_token)
 
         return {
             "access_token": jwt_token,
@@ -597,8 +720,6 @@ async def facebook_callback(code: str, db: Session = Depends(get_db)):
         }
     except HTTPException:
         raise
-    except Exception as e:
-        traceback.print_exc()
-        error_msg = str(e)
-        print(f"❌ Facebook Callback Error: {error_msg}")
-        raise HTTPException(status_code=500, detail=f"Facebook Login Error: {error_msg}")
+    except Exception:
+        logger.exception("Facebook callback failed")
+        raise HTTPException(status_code=500, detail="Facebook login failed")

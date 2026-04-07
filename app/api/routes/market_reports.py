@@ -11,6 +11,7 @@ from app.models.market_reports import (
     ForeignHeadroom,
     ShareBuyback,
     SBLPosition,
+    HistoricalReport,
 )
 from app.schemas.market_reports import (
     SubstantialShareholderResponse,
@@ -18,6 +19,7 @@ from app.schemas.market_reports import (
     ForeignHeadroomResponse,
     ShareBuybackResponse,
     SBLPositionResponse,
+    HistoricalReportResponse,
 )
 
 router = APIRouter()
@@ -96,3 +98,17 @@ def get_sbl_positions(
             query = query.filter(SBLPosition.report_date == latest[0])
             
     return query.order_by(SBLPosition.symbol).all()
+
+@router.get("/historical-reports", response_model=List[HistoricalReportResponse])
+def get_historical_reports(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(HistoricalReport)
+    if start_date:
+        query = query.filter(HistoricalReport.report_date >= start_date)
+    if end_date:
+        query = query.filter(HistoricalReport.report_date <= end_date)
+            
+    return query.order_by(desc(HistoricalReport.report_date)).all()

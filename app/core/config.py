@@ -7,8 +7,7 @@ load_dotenv()
 
 class Settings:
     def __init__(self):
-        # ⚠️ إزالة القيم الافتراضية المحلية في الإنتاج
-        self.DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://youssef:UtnuCIs7PL3879r7R4jjIHi5FBqoHpKy@dpg-d4k8djidbo4c73cqncl0-a.oregon-postgres.render.com/financialdb_bvyn?sslmode=require")
+        self.DATABASE_URL = os.getenv("DATABASE_URL")
         self.REDIS_URL = os.getenv("REDIS_URL")
         self.CACHE_EXPIRE_SECONDS = int(os.getenv("CACHE_EXPIRE_SECONDS", "300"))
         self.STOCK_PRICE_CACHE_SECONDS = int(os.getenv("STOCK_PRICE_CACHE_SECONDS", "300"))
@@ -24,14 +23,8 @@ class Settings:
         if self.DEBUG:
             self.ALLOWED_ORIGINS = ["*"]
         else:
-             # Fallback to allow all for troubleshooting if needed, or stick to list
-             self.ALLOWED_ORIGINS = ["*"]
-             # self.ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_str.split(",")]
-             # self.ALLOWED_ORIGINS.extend(["https://lumivst-backend-v2.onrender.com", "https://lumivst.onrender.com"])
-        
-        # إعدادات إضافية مهمة للإنتاج
-        self.DEBUG = os.getenv("DEBUG", "False").lower() == "true"
-        self.ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+            self.ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_str.split(",")]
+            self.ALLOWED_ORIGINS.extend(["https://lumivst-backend-v2.onrender.com", "https://lumivst.onrender.com"])
 
         # Email Settings
         self.SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -50,63 +43,5 @@ class Settings:
         self.FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 settings = Settings()
-
-
-
-
-# # app/core/config.py
-# import os
-# from dotenv import load_dotenv
-
-# load_dotenv()
-
-# # إعدادات PostgreSQL
-# DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:youssef505050@localhost/lumivst_db")
-
-# # إعدادات Redis
-# REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-# REDIS_PORT = int(os.getenv("REDIS_PORT", 7424))
-# REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-# REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}")
-
-# # إعدادات الكاش
-# CACHE_EXPIRE_SECONDS = int(os.getenv("CACHE_EXPIRE_SECONDS", 86400))  # 24 ساعة
-# STOCK_PRICE_CACHE_SECONDS = int(os.getenv("STOCK_PRICE_CACHE_SECONDS", 300))  # 5 دقائق
-
-# # -------------------------------
-# STATISTICS_CACHE_EXPIRY: int = 3600  # 1 hour
-# STATISTICS_CREDITS_COST: int = 50
-# # --------------------------------
-
-# # إعدادات التسجيل
-# LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-# # إعدادات Twelve Data
-# BASE_URL = "https://api.twelvedata.com"
-# API_KEY = os.getenv("TWELVE_DATA_API_KEY", "8e06aec81b4d415d905af639ce78449b")
-
-# class Settings:
-#     def __init__(self):
-#         self.database_url = DATABASE_URL
-#         self.redis_url = REDIS_URL
-#         self.redis_host = REDIS_HOST
-#         self.redis_port = REDIS_PORT
-#         self.redis_password = REDIS_PASSWORD
-#         self.cache_expire_seconds = CACHE_EXPIRE_SECONDS
-#         self.stock_price_cache_seconds = STOCK_PRICE_CACHE_SECONDS
-#         self.base_url = BASE_URL
-#         self.api_key = API_KEY
-#         self.log_level = LOG_LEVEL
-
-# # إنشاء instance
-# settings = Settings()
-
-
-
-
-
-
-
-
 
 

@@ -69,3 +69,17 @@ class SBLPosition(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (UniqueConstraint('report_date', 'symbol', name='uq_sbl_position_date'),)
+
+class HistoricalReport(Base):
+    __tablename__ = "historical_reports"
+    id = Column(Integer, primary_key=True, index=True)
+    report_date = Column(Date, nullable=False, index=True, unique=True)
+    open_price = Column(String(50), nullable=True)
+    high_price = Column(String(50), nullable=True)
+    low_price = Column(String(50), nullable=True)
+    close_price = Column(String(50), nullable=True)
+    volume_traded = Column(String(50), nullable=True)
+    value_traded = Column(String(50), nullable=True)
+    no_of_trades = Column(String(50), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
