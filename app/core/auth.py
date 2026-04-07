@@ -156,7 +156,7 @@ async def verify_token_exists(user_id: int, token: str) -> bool:
         if stored_user_id is None:
             # If Redis key is missing due to transient cache issue, keep app usable.
             return True
-        return stored_user_id == str(user_id)
+        return str(stored_user_id) == str(user_id)
     except Exception:
         # Degrade gracefully to JWT validation only on Redis/runtime errors.
         return True
@@ -176,7 +176,7 @@ async def verify_refresh_token_exists(user_id: int, token: str) -> bool:
         stored_user_id = await redis_cache.get(f"refresh_token:{jti}")
         if stored_user_id is None:
             return True
-        return stored_user_id == str(user_id)
+        return str(stored_user_id) == str(user_id)
     except Exception:
         return True
 
