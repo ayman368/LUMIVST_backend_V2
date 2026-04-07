@@ -39,12 +39,13 @@ def validate_password_strength(password: str):
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     is_secure = settings.ENVIRONMENT.lower() == "production"
+    cookie_samesite = "none" if is_secure else "lax"
     response.set_cookie(
         key="session_token",
         value=access_token,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=cookie_samesite,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -53,7 +54,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
         value=refresh_token,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=cookie_samesite,
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         path="/",
     )
@@ -67,12 +68,13 @@ def clear_auth_cookies(response: Response):
 
 def set_pending_cookie(response: Response, pending_token: str):
     is_secure = settings.ENVIRONMENT.lower() == "production"
+    cookie_samesite = "none" if is_secure else "lax"
     response.set_cookie(
         key="pending_token",
         value=pending_token,
         httponly=True,
         secure=is_secure,
-        samesite="lax",
+        samesite=cookie_samesite,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
