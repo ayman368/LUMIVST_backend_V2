@@ -27,12 +27,14 @@ class RSDaily(Base):
     acc_dis_rating = Column(String(5))           # Accumulation/Distribution Rating (A-E)
     
     # العوائد
+    return_1m = Column(Numeric(10, 6))
     return_3m = Column(Numeric(10, 6))
     return_6m = Column(Numeric(10, 6))
     return_9m = Column(Numeric(10, 6))
     return_12m = Column(Numeric(10, 6))
     
     # الرتب التفصيلية (New)
+    rank_1m = Column(Integer)
     rank_3m = Column(Integer)
     rank_6m = Column(Integer)
     rank_9m = Column(Integer)

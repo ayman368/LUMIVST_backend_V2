@@ -21,6 +21,7 @@ class RSV2Item(BaseModel):
     return_6m: Optional[float] = None
     return_9m: Optional[float] = None
     return_12m: Optional[float] = None
+    rank_1m: Optional[int] = None
     rank_3m: Optional[int] = None
     rank_6m: Optional[int] = None
     rank_9m: Optional[int] = None
@@ -97,7 +98,7 @@ async def get_latest_rs_v2(
         query = """
             SELECT symbol, date, rs_rating, rs_raw, 
                    return_3m, return_6m, return_9m, return_12m,
-                   rank_3m, rank_6m, rank_9m, rank_12m,
+                   rank_1m, rank_3m, rank_6m, rank_9m, rank_12m,
                    company_name, industry_group,
                    sector_rs_rating, industry_group_rs_rating, industry_rs_rating, sub_industry_rs_rating, acc_dis_rating
             FROM rs_daily_v2
@@ -133,17 +134,18 @@ async def get_latest_rs_v2(
             return_6m=float(row[5]) if row[5] else None,
             return_9m=float(row[6]) if row[6] else None,
             return_12m=float(row[7]) if row[7] else None,
-            rank_3m=row[8],
-            rank_6m=row[9],
-            rank_9m=row[10],
-            rank_12m=row[11],
-            company_name=row[12],
-            industry_group=row[13],
-            sector_rs_rating=row[14],
-            industry_group_rs_rating=row[15],
-            industry_rs_rating=row[16],
-            sub_industry_rs_rating=row[17],
-            acc_dis_rating=row[18]
+            rank_1m=row[8],
+            rank_3m=row[9],
+            rank_6m=row[10],
+            rank_9m=row[11],
+            rank_12m=row[12],
+            company_name=row[13],
+            industry_group=row[14],
+            sector_rs_rating=row[15],
+            industry_group_rs_rating=row[16],
+            industry_rs_rating=row[17],
+            sub_industry_rs_rating=row[18],
+            acc_dis_rating=row[19]
         ) for row in rows]
         
         # Get total count

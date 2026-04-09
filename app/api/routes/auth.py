@@ -3,10 +3,34 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.core.auth import *
+from app.core.auth import (
+    get_password_hash,
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    store_token_in_redis,
+    store_refresh_token_in_redis,
+    invalidate_token,
+    invalidate_refresh_token,
+    verify_token_exists,
+    verify_refresh_token_exists,
+    decode_token,
+    verify_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
+    generate_token,
+    hash_token,
+)
 from app.api.deps import get_current_user as require_current_user
 from app.models.user import User
-from app.schemas.auth import *
+from app.schemas.auth import (
+    UserLogin,
+    UserRegister,
+    UserUpdate,
+    UserResponse,
+    ForgetPasswordRequest,
+    ResetPasswordRequest,
+)
 from app.core.redis import redis_cache, store_verification_token, get_verification_token, delete_verification_token
 from app.services.email_service import send_email
 from app.core.config import settings
@@ -61,9 +85,11 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
 
 
 def clear_auth_cookies(response: Response):
-    response.delete_cookie("session_token", path="/")
-    response.delete_cookie("refresh_token", path="/")
-    response.delete_cookie("pending_token", path="/")
+    is_secure = settings.ENVIRONMENT.lower() == "production"
+    cookie_samesite = "none" if is_secure else "lax"
+    response.delete_cookie("session_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
+    response.delete_cookie("refresh_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
+    response.delete_cookie("pending_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
 
 
 def set_pending_cookie(response: Response, pending_token: str):
@@ -110,7 +136,8 @@ async def consume_oauth_state(provider: str, state: str):
     return verifier
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(user: UserRegister, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def register(request: Request, user: UserRegister, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     # التحقق من وجود المستخدم
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
@@ -136,7 +163,7 @@ async def register(user: UserRegister, background_tasks: BackgroundTasks, db: Se
     try:
         verification_token = str(uuid.uuid4())
         await store_verification_token(db_user.id, verification_token)
-        verification_link = f"http://localhost:3000/auth/verify-email?token={verification_token}"
+        verification_link = f"{settings.FRONTEND_URL}/auth/verify-email?token={verification_token}"
         
         email_body = f"""
         <h1>مرحباً {db_user.full_name}</h1>
@@ -150,7 +177,30 @@ async def register(user: UserRegister, background_tasks: BackgroundTasks, db: Se
     except Exception as e:
         print(f"⚠️ Failed to queue verification email: {e}")
     
-    return {"message": "تم إنشاء الحساب بنجاح. الحساب بانتظار موافقة الإدارة وتأكيد البريد الإلكتروني."}
+    # Create pending token for polling approval status
+    temp_token = create_access_token(data={
+        "sub": str(db_user.id),
+        "email": db_user.email,
+        "is_approved": False,
+        "is_admin": False,
+        "scope": "check_approval_only"
+    })
+    await store_token_in_redis(db_user.id, temp_token)
+
+    register_response = JSONResponse(
+        status_code=201,
+        content={
+            "message": "تم إنشاء الحساب بنجاح. الحساب بانتظار موافقة الإدارة وتأكيد البريد الإلكتروني.",
+            "user": {
+                "id": db_user.id,
+                "email": db_user.email,
+                "full_name": db_user.full_name,
+                "is_approved": False,
+            }
+        }
+    )
+    set_pending_cookie(register_response, temp_token)
+    return register_response
 
 @router.post("/refresh-token")
 async def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
@@ -221,10 +271,29 @@ async def login(request: Request, response: Response, user: UserLogin, db: Sessi
             
         # ✅ Check Approval Status
         if not db_user.is_approved:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, 
-                detail="الحساب بانتظار موافقة الإدارة. سيتم إشعارك عند التفعيل."
+            # Create a pending token so the pending-approval page can poll for status
+            temp_token = create_access_token(data={
+                "sub": str(db_user.id),
+                "email": db_user.email,
+                "is_approved": False,
+                "is_admin": False,
+                "scope": "check_approval_only"
+            })
+            await store_token_in_redis(db_user.id, temp_token)
+            pending_response = JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "الحساب بانتظار موافقة الإدارة. سيتم إشعارك عند التفعيل.",
+                    "user": {
+                        "id": db_user.id,
+                        "email": db_user.email,
+                        "full_name": db_user.full_name,
+                        "is_approved": False,
+                    }
+                }
             )
+            set_pending_cookie(pending_response, temp_token)
+            return pending_response
         
         access_token, refresh_token = await create_and_store_tokens(db_user)
         set_auth_cookies(response, access_token, refresh_token)
@@ -343,8 +412,9 @@ async def delete_account(
     return {"message": "تم حذف الحساب بنجاح"}
 
 @router.post("/forget-password")
-async def forget_password(request: ForgetPasswordRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == request.email).first()
+@limiter.limit("3/minute")
+async def forget_password(request: Request, payload: ForgetPasswordRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
     
     # SECURITY: Always return success to prevent Email Enumeration
     if not user:
@@ -379,11 +449,12 @@ async def forget_password(request: ForgetPasswordRequest, background_tasks: Back
     return {"message": "إذا كان البريد مسجلاً، سيتم إرسال رابط الاستعادة."}
 
 @router.post("/reset-password")
-async def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
-    validate_password_strength(request.password)
+@limiter.limit("3/minute")
+async def reset_password(request: Request, payload: ResetPasswordRequest, db: Session = Depends(get_db)):
+    validate_password_strength(payload.password)
 
     # 1. Hash incoming token
-    incoming_token_hash = hash_token(request.token)
+    incoming_token_hash = hash_token(payload.token)
     
     # 2. Find user by Token Hash
     user = db.query(User).filter(User.reset_token_hash == incoming_token_hash).first()
@@ -396,7 +467,7 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
         raise HTTPException(status_code=400, detail="انتهت صلاحية الرابط")
         
     # 4. Update Password
-    user.hashed_password = get_password_hash(request.password)
+    user.hashed_password = get_password_hash(payload.password)
     
     # 5. SECURITY: Invalidate Token (Single Use)
     user.reset_token_hash = None
@@ -405,6 +476,69 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
     db.commit()
     
     return {"message": "تم تغيير كلمة المرور بنجاح"}
+
+
+@router.post("/activate-session")
+async def activate_session(request: Request, db: Session = Depends(get_db)):
+    """Convert pending_token into a full session after admin approval."""
+    pending_token = request.cookies.get("pending_token")
+    if not pending_token:
+        raise HTTPException(status_code=401, detail="Pending token missing")
+
+    payload = decode_token(pending_token)
+    if payload.get("scope") != "check_approval_only":
+        raise HTTPException(status_code=401, detail="Invalid token scope")
+
+    user_id = int(payload.get("sub"))
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if not user.is_approved:
+        raise HTTPException(status_code=403, detail="Account not yet approved")
+
+    # User is approved — create full session tokens
+    access_token, refresh_token = await create_and_store_tokens(user)
+
+    # Invalidate the pending token
+    pending_jti = payload.get("jti")
+    if pending_jti:
+        await invalidate_token(user_id, pending_jti)
+
+    response = JSONResponse(content={
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "full_name": user.full_name,
+            "is_verified": user.is_verified,
+            "is_approved": user.is_approved,
+            "is_admin": user.is_admin,
+        }
+    })
+    set_auth_cookies(response, access_token, refresh_token)
+    # Clear the pending token cookie
+    is_secure = settings.ENVIRONMENT.lower() == "production"
+    cookie_samesite = "none" if is_secure else "lax"
+    response.delete_cookie("pending_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
+    return response
+
+@router.get("/pending-status/check")
+async def pending_status_check(request: Request, db: Session = Depends(get_db)):
+    """Simple polling endpoint to check approval status."""
+    pending_token = request.cookies.get("pending_token")
+    if not pending_token:
+        raise HTTPException(status_code=401, detail="Pending token missing")
+
+    payload = decode_token(pending_token)
+    if payload.get("scope") != "check_approval_only":
+        raise HTTPException(status_code=401, detail="Invalid pending token scope")
+
+    user_id = int(payload.get("sub"))
+    user = db.query(User).filter(User.id == user_id).first()
+    approved = bool(user and user.is_approved)
+    return {"approved": approved}
 
 
 @router.get("/pending-status/stream")
@@ -433,7 +567,8 @@ async def pending_status_stream(request: Request, db: Session = Depends(get_db))
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/verify-email")
-async def verify_email(token: str, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def verify_email(request: Request, token: str, db: Session = Depends(get_db)):
     user_id = await get_verification_token(token)
     if not user_id:
         raise HTTPException(status_code=400, detail="توكن غير صالح أو منتهي")
@@ -470,7 +605,8 @@ async def google_login():
     }
 
 @router.post("/google/callback")
-async def google_callback(code: str, state: str, response: Response, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def google_callback(request: Request, code: str, state: str, response: Response, db: Session = Depends(get_db)):
     try:
         verifier = await consume_oauth_state("google", state)
         if not verifier:
@@ -492,8 +628,8 @@ async def google_callback(code: str, state: str, response: Response, db: Session
         }
         
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(token_url, data=data)
-            token_data = response.json()
+            token_response = await client.post(token_url, data=data)
+            token_data = token_response.json()
             
         if "error" in token_data:
             error_msg = token_data.get("error_description", token_data.get("error", "Google Login Failed"))
@@ -507,10 +643,10 @@ async def google_callback(code: str, state: str, response: Response, db: Session
         
         # Get user info
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"https://www.googleapis.com/oauth2/v3/userinfo?access_token={access_token_from_google}")
-            user_info = response.json()
+            userinfo_response = await client.get(f"https://www.googleapis.com/oauth2/v3/userinfo?access_token={access_token_from_google}")
+            user_info = userinfo_response.json()
             
-        if response.status_code != 200:
+        if userinfo_response.status_code != 200:
             error_msg = user_info.get("error_description", "Failed to get user info from Google")
             raise HTTPException(status_code=400, detail=error_msg)
         
@@ -608,7 +744,8 @@ async def facebook_login():
     }
 
 @router.post("/facebook/callback")
-async def facebook_callback(code: str, state: str, response: Response, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def facebook_callback(request: Request, code: str, state: str, response: Response, db: Session = Depends(get_db)):
     try:
         verifier = await consume_oauth_state("facebook", state)
         if not verifier:
@@ -628,8 +765,8 @@ async def facebook_callback(code: str, state: str, response: Response, db: Sessi
         }
         
         async with httpx.AsyncClient() as client:
-            response = await client.get(token_url, params=params)
-            token_data = response.json()
+            token_response = await client.get(token_url, params=params)
+            token_data = token_response.json()
             
         if "error" in token_data:
             error_msg = token_data.get("error", {}).get("message", "Facebook Login Failed")
@@ -642,8 +779,8 @@ async def facebook_callback(code: str, state: str, response: Response, db: Sessi
         
         # Get user info
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"https://graph.facebook.com/me?fields=id,name,email&access_token={access_token_from_facebook}")
-            user_info = response.json()
+            userinfo_response = await client.get(f"https://graph.facebook.com/me?fields=id,name,email&access_token={access_token_from_facebook}")
+            user_info = userinfo_response.json()
             
         if "error" in user_info:
             error_msg = user_info.get("error", {}).get("message", "Failed to get user info from Facebook")
