@@ -455,7 +455,7 @@ def get_company_financial_data_by_section(
         section = category.section if category else 'other'
         
         source_str = metric.source_file if metric.source_file else "unknown"
-        period_key = f"{metric.year} {metric.period}::{source_str}"
+        period_key = f"{metric.year} {metric.period}"
         
         metric_obj = {
             "key": metric.metric_name,

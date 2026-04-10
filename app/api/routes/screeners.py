@@ -28,7 +28,7 @@ def safe_bool(value):
 
 def screener_to_dict(ind: StockIndicator, rs_rating=None) -> dict:
     """تحويل بيانات المؤشر إلى قاموس"""
-    return {
+    base_dict = {
         'symbol': ind.symbol,
         'company_name': ind.company_name,
         'date': str(ind.date) if ind.date else None,
@@ -50,9 +50,6 @@ def screener_to_dict(ind: StockIndicator, rs_rating=None) -> dict:
         'fifty_two_week_low': safe_float(ind.fifty_two_week_low),
         'percent_off_52w_high': safe_float(ind.percent_off_52w_high),
         'percent_off_52w_low': safe_float(ind.percent_off_52w_low),
-
-        # ============ RS ============
-        'rs_12m': rs_rating,
 
         # ============ Technical Indicators ============
         'rsi_14': safe_float(ind.rsi_14),
@@ -84,6 +81,29 @@ def screener_to_dict(ind: StockIndicator, rs_rating=None) -> dict:
         'sma200_gt_sma200_5m_ago': safe_bool(ind.sma200_gt_sma200_5m_ago),
     }
 
+    if isinstance(rs_rating, dict):
+        return {
+            **base_dict,
+            'rs_12m': rs_rating.get('rs_rating'),
+            'rs_rating': rs_rating.get('rs_rating'),
+            'rank_1m': rs_rating.get('rank_1m'),
+            'rank_3m': rs_rating.get('rank_3m'),
+            'rank_6m': rs_rating.get('rank_6m'),
+            'rank_9m': rs_rating.get('rank_9m'),
+            'rank_12m': rs_rating.get('rank_12m'),
+        }
+    else:
+        return {
+            **base_dict,
+            'rs_12m': rs_rating,
+            'rs_rating': rs_rating,
+            'rank_1m': None,
+            'rank_3m': None,
+            'rank_6m': None,
+            'rank_9m': None,
+            'rank_12m': None,
+        }
+
 
 def get_latest_date(db: Session) -> date:
     """الحصول على آخر تاريخ متاح في stock_indicators"""
@@ -92,15 +112,25 @@ def get_latest_date(db: Session) -> date:
 
 def get_rs_map(db: Session, target_date) -> dict:
     """
-    جلب RS Rating من rs_daily_v2 لكل سهم في تاريخ محدد.
-    Returns: dict {symbol: rs_rating}
+    جلب معلومات الـ RS من rs_daily_v2 لكل سهم في تاريخ محدد.
+    Returns: dict {symbol: dict}
     """
     rows = (
-        db.query(RSDaily.symbol, RSDaily.rs_rating)
+        db.query(RSDaily.symbol, RSDaily.rs_rating, RSDaily.rank_1m, RSDaily.rank_3m, RSDaily.rank_6m, RSDaily.rank_9m, RSDaily.rank_12m)
         .filter(RSDaily.date == target_date)
         .all()
     )
-    return {row.symbol: row.rs_rating for row in rows}
+    return {
+        row.symbol: {
+            'rs_rating': row.rs_rating,
+            'rank_1m': row.rank_1m,
+            'rank_3m': row.rank_3m,
+            'rank_6m': row.rank_6m,
+            'rank_9m': row.rank_9m,
+            'rank_12m': row.rank_12m,
+        }
+        for row in rows
+    }
 
 
 # ============ SCREENER 1: TREND - 1 MONTH ============
@@ -136,7 +166,7 @@ def get_trend_1_month(
     # Fetch RS map for the date
     rs_map = get_rs_map(db, latest)
     # Only keep symbols with RS > 69
-    rs_symbols = {sym for sym, rating in rs_map.items() if rating is not None and rating > 69}
+    rs_symbols = {sym for sym, data in rs_map.items() if data is not None and data.get('rs_rating') is not None and data.get('rs_rating') > 69}
 
     query = db.query(StockIndicator).filter(StockIndicator.date == latest)
 
@@ -202,7 +232,7 @@ def get_trend_2_months(
         latest = get_latest_date(db)
 
     rs_map = get_rs_map(db, latest)
-    rs_symbols = {sym for sym, rating in rs_map.items() if rating is not None and rating > 69}
+    rs_symbols = {sym for sym, data in rs_map.items() if data is not None and data.get('rs_rating') is not None and data.get('rs_rating') > 69}
 
     query = db.query(StockIndicator).filter(StockIndicator.date == latest)
 
@@ -271,7 +301,7 @@ def get_trend_4_months(
         latest = get_latest_date(db)
 
     rs_map = get_rs_map(db, latest)
-    rs_symbols = {sym for sym, rating in rs_map.items() if rating is not None and rating > 69}
+    rs_symbols = {sym for sym, data in rs_map.items() if data is not None and data.get('rs_rating') is not None and data.get('rs_rating') > 69}
 
     query = db.query(StockIndicator).filter(StockIndicator.date == latest)
 
@@ -346,7 +376,7 @@ def get_trend_5_months(
         latest = get_latest_date(db)
 
     rs_map = get_rs_map(db, latest)
-    rs_symbols = {sym for sym, rating in rs_map.items() if rating is not None and rating > 69}
+    rs_symbols = {sym for sym, data in rs_map.items() if data is not None and data.get('rs_rating') is not None and data.get('rs_rating') > 69}
 
     query = db.query(StockIndicator).filter(StockIndicator.date == latest)
 

@@ -63,13 +63,14 @@ def validate_password_strength(password: str):
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     is_secure = settings.ENVIRONMENT.lower() == "production"
-    cookie_samesite = "none" if is_secure else "lax"
+    # SameSite=Lax is correct because API requests go through the Next.js proxy (same-origin).
+    # No need for "none" which would weaken CSRF protection.
     response.set_cookie(
         key="session_token",
         value=access_token,
         httponly=True,
         secure=is_secure,
-        samesite=cookie_samesite,
+        samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )
@@ -78,7 +79,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
         value=refresh_token,
         httponly=True,
         secure=is_secure,
-        samesite=cookie_samesite,
+        samesite="lax",
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         path="/",
     )
@@ -86,21 +87,19 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
 
 def clear_auth_cookies(response: Response):
     is_secure = settings.ENVIRONMENT.lower() == "production"
-    cookie_samesite = "none" if is_secure else "lax"
-    response.delete_cookie("session_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
-    response.delete_cookie("refresh_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
-    response.delete_cookie("pending_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
+    response.delete_cookie("session_token", path="/", secure=is_secure, httponly=True, samesite="lax")
+    response.delete_cookie("refresh_token", path="/", secure=is_secure, httponly=True, samesite="lax")
+    response.delete_cookie("pending_token", path="/", secure=is_secure, httponly=True, samesite="lax")
 
 
 def set_pending_cookie(response: Response, pending_token: str):
     is_secure = settings.ENVIRONMENT.lower() == "production"
-    cookie_samesite = "none" if is_secure else "lax"
     response.set_cookie(
         key="pending_token",
         value=pending_token,
         httponly=True,
         secure=is_secure,
-        samesite=cookie_samesite,
+        samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         path="/",
     )

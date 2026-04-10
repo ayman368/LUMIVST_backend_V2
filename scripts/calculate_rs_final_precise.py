@@ -235,6 +235,7 @@ class RSCalculatorUltraFast:
                     p.symbol,
                     p.date,
                     p.close,
+                    LAG(p.close, 21) OVER (PARTITION BY p.symbol ORDER BY p.date) as price_1m_ago,
                     LAG(p.close, 63) OVER (PARTITION BY p.symbol ORDER BY p.date) as price_3m_ago,
                     LAG(p.close, 126) OVER (PARTITION BY p.symbol ORDER BY p.date) as price_6m_ago,
                     LAG(p.close, 189) OVER (PARTITION BY p.symbol ORDER BY p.date) as price_9m_ago,
@@ -251,6 +252,7 @@ class RSCalculatorUltraFast:
                     sl.industry_group,
                     pd.date,
                     pd.close as current_price,
+                    pd.price_1m_ago,
                     pd.price_3m_ago,
                     pd.price_6m_ago,
                     pd.price_9m_ago,
@@ -268,6 +270,7 @@ class RSCalculatorUltraFast:
                 date,
                 current_price,
                 -- Calculate returns as FLOAT
+                CAST((current_price - price_1m_ago) / price_1m_ago AS FLOAT) as return_1m,
                 CAST((current_price - price_3m_ago) / price_3m_ago AS FLOAT) as return_3m,
                 CAST((current_price - price_6m_ago) / price_6m_ago AS FLOAT) as return_6m,
                 CAST((current_price - price_9m_ago) / price_9m_ago AS FLOAT) as return_9m,
@@ -287,7 +290,7 @@ class RSCalculatorUltraFast:
                 return []
             
             # CONVERT all to float to avoid Decimal issues
-            numeric_cols = ['current_price', 'return_3m', 'return_6m', 'return_9m', 'return_12m']
+            numeric_cols = ['current_price', 'return_1m', 'return_3m', 'return_6m', 'return_9m', 'return_12m']
             for col in numeric_cols:
                 # Handle None/NaN before conversion
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -296,7 +299,7 @@ class RSCalculatorUltraFast:
             # 2. Calculate Ranks for EACH period independently FIRST (Excel Logic)
             # This matches: PERCENTRANK.INC for each change% period
             period_ranks = {}
-            for period in ['3m', '6m', '9m', '12m']:
+            for period in ['1m', '3m', '6m', '9m', '12m']:
                 col_name = f'return_{period}'
                 values = df[col_name].values
                 valid_mask = ~np.isnan(values)
@@ -368,12 +371,14 @@ class RSCalculatorUltraFast:
                     'symbol': str(row['symbol']),
                     'date': row['date'],
                     'current_price': float(row['current_price']),
+                    'return_1m': float(row['return_1m']),
                     'return_3m': float(row['return_3m']),
                     'return_6m': float(row['return_6m']),
                     'return_9m': float(row['return_9m']),
                     'return_12m': float(row['return_12m']),
                     'rs_raw': float(row['rs_raw']),
                     'rs_rating': int(row['rs_rating']) if row.get('rs_rating') is not None else None,
+                    'rank_1m': int(row['rank_1m']) if row.get('rank_1m') is not None else None,
                     'rank_3m': int(row['rank_3m']) if row.get('rank_3m') is not None else None,
                     'rank_6m': int(row['rank_6m']) if row.get('rank_6m') is not None else None,
                     'rank_9m': int(row['rank_9m']) if row.get('rank_9m') is not None else None,
@@ -412,8 +417,8 @@ class RSCalculatorUltraFast:
             # Select only required columns
             df_to_save = df_complete[[
                 'symbol', 'date', 'rs_rating', 'rs_raw',
-                'return_3m', 'return_6m', 'return_9m', 'return_12m',
-                'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m',
+                'return_1m', 'return_3m', 'return_6m', 'return_9m', 'return_12m',
+                'rank_1m', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m',
                 'company_name', 'industry_group'
             ]]
             
@@ -439,17 +444,19 @@ class RSCalculatorUltraFast:
         
         stmt = """
             INSERT INTO rs_daily_v2 
-            (symbol, date, rs_rating, rs_raw, return_3m, return_6m, return_9m, return_12m,
-             rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group)
-            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_3m, :return_6m, :return_9m, :return_12m,
-             :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group)
+            (symbol, date, rs_rating, rs_raw, return_1m, return_3m, return_6m, return_9m, return_12m,
+             rank_1m, rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group)
+            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_1m, :return_3m, :return_6m, :return_9m, :return_12m,
+             :rank_1m, :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group)
             ON CONFLICT (symbol, date) DO UPDATE SET
             rs_rating = EXCLUDED.rs_rating,
             rs_raw = EXCLUDED.rs_raw,
+            return_1m = EXCLUDED.return_1m,
             return_3m = EXCLUDED.return_3m,
             return_6m = EXCLUDED.return_6m,
             return_9m = EXCLUDED.return_9m,
             return_12m = EXCLUDED.return_12m,
+            rank_1m = EXCLUDED.rank_1m,
             rank_3m = EXCLUDED.rank_3m,
             rank_6m = EXCLUDED.rank_6m,
             rank_9m = EXCLUDED.rank_9m,
@@ -478,10 +485,12 @@ class RSCalculatorUltraFast:
                         date DATE,
                         rs_rating INTEGER,
                         rs_raw DECIMAL(10, 6),
+                        return_1m DECIMAL(10, 6),
                         return_3m DECIMAL(10, 6),
                         return_6m DECIMAL(10, 6),
                         return_9m DECIMAL(10, 6),
                         return_12m DECIMAL(10, 6),
+                        rank_1m INTEGER,
                         rank_3m INTEGER,
                         rank_6m INTEGER,
                         rank_9m INTEGER,
@@ -664,10 +673,12 @@ class RSCalculatorUltraFast:
                     date DATE,
                     rs_rating INTEGER,
                     rs_raw DECIMAL(10, 6),
+                    return_1m DECIMAL(10, 6),
                     return_3m DECIMAL(10, 6),
                     return_6m DECIMAL(10, 6),
                     return_9m DECIMAL(10, 6),
                     return_12m DECIMAL(10, 6),
+                    rank_1m INTEGER,
                     rank_3m INTEGER,
                     rank_6m INTEGER,
                     rank_9m INTEGER,
@@ -794,6 +805,7 @@ class RSCalculatorUltraFast:
             df_wide = df_wide.ffill(limit=10)
             
             periods = {
+                '1m': 21,
                 '3m': 63,
                 '6m': 126,
                 '9m': 189,
@@ -818,6 +830,7 @@ class RSCalculatorUltraFast:
                 return s
 
             df_all = pd.concat([
+                melt_returns(returns_dfs['1m'], 'return_1m'),
                 melt_returns(returns_dfs['3m'], 'return_3m'),
                 melt_returns(returns_dfs['6m'], 'return_6m'),
                 melt_returns(returns_dfs['9m'], 'return_9m'),
@@ -932,8 +945,8 @@ class RSCalculatorUltraFast:
         # الأعمدة المطلوبة
         cols_to_save = [
             'symbol', 'date', 'rs_rating', 'rs_raw',
-            'return_3m', 'return_6m', 'return_9m', 'return_12m',
-            'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m',
+            'return_1m', 'return_3m', 'return_6m', 'return_9m', 'return_12m',
+            'rank_1m', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m',
             'company_name', 'industry_group'
         ]
         
@@ -1064,8 +1077,8 @@ class RSCalculatorUltraFast:
         # الأعمدة المطلوبة
         cols_to_save = [
             'symbol', 'date', 'rs_rating', 'rs_raw',
-            'return_3m', 'return_6m', 'return_9m', 'return_12m',
-            'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m',
+            'return_1m', 'return_3m', 'return_6m', 'return_9m', 'return_12m',
+            'rank_1m', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m',
             'company_name', 'industry_group'
         ]
         
@@ -1080,7 +1093,7 @@ class RSCalculatorUltraFast:
         
         # تنظيف البيانات بسرعة
         # CRITICAL: Convert integer columns FIRST before generic str conversion
-        int_cols = ['rs_rating', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m']
+        int_cols = ['rs_rating', 'rank_1m', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m']
         for col in int_cols:
             if col in df_clean.columns:
                 df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
@@ -1151,7 +1164,7 @@ class RSCalculatorUltraFast:
         print(f"\n{'='*60}")
         print(f"🎉 SAVING COMPLETED!")
         print(f"{'='*60}")
-        print(f"� Statistics:")
+        print(f" Statistics:")
         print(f"   ✅ Total Rows Saved: {total_saved:,}")
         print(f"   ⏱️  Total Time: {total_time/60:.1f} minutes")
         if total_time > 0:
@@ -1181,17 +1194,19 @@ class RSCalculatorUltraFast:
         
         stmt = """
             INSERT INTO rs_daily_v2 
-            (symbol, date, rs_rating, rs_raw, return_3m, return_6m, return_9m, return_12m,
-             rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group)
-            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_3m, :return_6m, :return_9m, :return_12m,
-             :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group)
+            (symbol, date, rs_rating, rs_raw, return_1m, return_3m, return_6m, return_9m, return_12m,
+             rank_1m, rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group)
+            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_1m, :return_3m, :return_6m, :return_9m, :return_12m,
+             :rank_1m, :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group)
             ON CONFLICT (symbol, date) DO UPDATE SET
             rs_rating = EXCLUDED.rs_rating,
             rs_raw = EXCLUDED.rs_raw,
+            return_1m = EXCLUDED.return_1m,
             return_3m = EXCLUDED.return_3m,
             return_6m = EXCLUDED.return_6m,
             return_9m = EXCLUDED.return_9m,
             return_12m = EXCLUDED.return_12m,
+            rank_1m = EXCLUDED.rank_1m,
             rank_3m = EXCLUDED.rank_3m,
             rank_6m = EXCLUDED.rank_6m,
             rank_9m = EXCLUDED.rank_9m,
@@ -1243,19 +1258,21 @@ class RSCalculatorUltraFast:
         
         stmt = """
             INSERT INTO rs_daily_v2 
-            (symbol, date, rs_rating, rs_raw, return_3m, return_6m, return_9m, return_12m,
-             rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group,
+            (symbol, date, rs_rating, rs_raw, return_1m, return_3m, return_6m, return_9m, return_12m,
+             rank_1m, rank_3m, rank_6m, rank_9m, rank_12m, company_name, industry_group,
              sector_rs_rating, industry_group_rs_rating, industry_rs_rating, sub_industry_rs_rating, acc_dis_rating)
-            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_3m, :return_6m, :return_9m, :return_12m,
-             :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group,
+            VALUES (:symbol, :date, :rs_rating, :rs_raw, :return_1m, :return_3m, :return_6m, :return_9m, :return_12m,
+             :rank_1m, :rank_3m, :rank_6m, :rank_9m, :rank_12m, :company_name, :industry_group,
              :sector_rs_rating, :industry_group_rs_rating, :industry_rs_rating, :sub_industry_rs_rating, :acc_dis_rating)
             ON CONFLICT (symbol, date) DO UPDATE SET
             rs_rating = EXCLUDED.rs_rating,
             rs_raw = EXCLUDED.rs_raw,
+            return_1m = EXCLUDED.return_1m,
             return_3m = EXCLUDED.return_3m,
             return_6m = EXCLUDED.return_6m,
             return_9m = EXCLUDED.return_9m,
             return_12m = EXCLUDED.return_12m,
+            rank_1m = EXCLUDED.rank_1m,
             rank_3m = EXCLUDED.rank_3m,
             rank_6m = EXCLUDED.rank_6m,
             rank_9m = EXCLUDED.rank_9m,

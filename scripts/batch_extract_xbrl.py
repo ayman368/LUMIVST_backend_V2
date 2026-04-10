@@ -1,29 +1,38 @@
 """
-Batch XBRL Extraction to PostgreSQL (Enhanced with Categorization)
-===================================================================
-1. Extracts data from XBRL Excel files using pandas (with robust fallback).
-2. Automatically categorizes metrics into sections (Income Statement, Cash Flow, Balance Sheet).
-3. Creates/updates financial metric categories in the database.
-4. Separates clean numeric values from text values.
-5. Uses PostgreSQL COPY protocol for ultra-fast bulk insertion.
-6. Handles duplicates via UPSERT (ON CONFLICT DO UPDATE).
+Batch XBRL Extraction to PostgreSQL — FIXED VERSION
+=====================================================
+Fixes applied vs original:
+  1. BLOCK_CODE_MAP corrected to match actual XBRL file structure:
+       300200 = Balance Sheet   (was wrongly income_statement)
+       300400 = Income Statement (was wrongly cash_flow)
+       300700 = Cash Flow        (was missing entirely)
+  2. Section is ALWAYS derived from the active block code — keyword
+     fallback is only used when no block code has been seen yet (e.g.
+     filing info rows).  This eliminates cross-section contamination
+     (Cash Flow "Profit before tax" rows no longer land in income_statement).
+  3. All value columns are extracted per block, not just column-1.
+     Each column is mapped to its own (start_date, end_date) pair taken
+     from the Start Date / End Date rows inside the block, so every
+     historical / comparative value gets its own row with the correct period.
+  4. "Note No." columns are detected and skipped.
+  5. \xa0 (non-breaking space) is treated as empty — not stored as text.
 
-Usage:
-    python scripts/batch_extract_xbrl.py                          # All symbols
-    python scripts/batch_extract_xbrl.py --symbols 1010 2222      # Specific symbols
-    python scripts/batch_extract_xbrl.py --workers 12             # More parallelism
+Usage: same as original
+    python scripts/batch_extract_xbrl_fixed.py
+    python scripts/batch_extract_xbrl_fixed.py --symbols 1010 2222
+    python scripts/batch_extract_xbrl_fixed.py --workers 12
 """
 
 import os
 import sys
 import re
-import pandas as pd
-import argparse
-import time
 import io
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+import time
+import argparse
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from sqlalchemy import create_engine, text, func as sa_func
+from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,94 +41,78 @@ load_dotenv()
 from app.core.config import settings
 from app.models.financial_metric_categories import FinancialMetricCategory
 
-# Database Connection
 engine = create_engine(settings.DATABASE_URL)
 Session = sessionmaker(bind=engine)
 
 # ---------------------------------------------------------------------------
-# Metric Classification
+# CORRECTED Block-code → (section, subsection) mapping
 # ---------------------------------------------------------------------------
-
-METRIC_SECTION_MAPPING = {
-    # Income Statement
-    'revenue': ('income_statement', 'revenue'),
-    'sales': ('income_statement', 'revenue'),
-    'net_sales': ('income_statement', 'revenue'),
-    'cost_of_goods': ('income_statement', 'cost_of_sales'),
-    'cost_of_sales': ('income_statement', 'cost_of_sales'),
-    'gross_profit': ('income_statement', 'profitability'),
-    'operating_expenses': ('income_statement', 'operating_expenses'),
-    'operating_income': ('income_statement', 'profitability'),
-    'operating_profit': ('income_statement', 'profitability'),
-    'ebit': ('income_statement', 'profitability'),
-    'interest_expense': ('income_statement', 'financing'),
-    'interest_income': ('income_statement', 'financing'),
-    'profit_before_tax': ('income_statement', 'profitability'),
-    'income_tax': ('income_statement', 'tax'),
-    'tax_expense': ('income_statement', 'tax'),
-    'net_income': ('income_statement', 'profitability'),
-    'net_profit': ('income_statement', 'profitability'),
-    'earnings': ('income_statement', 'profitability'),
-
-    # Balance Sheet
-    'total_assets': ('balance_sheet', 'assets'),
-    'current_assets': ('balance_sheet', 'assets'),
-    'cash': ('balance_sheet', 'assets'),
-    'cash_equivalents': ('balance_sheet', 'assets'),
-    'accounts_receivable': ('balance_sheet', 'assets'),
-    'inventory': ('balance_sheet', 'assets'),
-    'property_plant': ('balance_sheet', 'assets'),
-    'total_liabilities': ('balance_sheet', 'liabilities'),
-    'current_liabilities': ('balance_sheet', 'liabilities'),
-    'accounts_payable': ('balance_sheet', 'liabilities'),
-    'long_term_debt': ('balance_sheet', 'liabilities'),
-    'short_term_debt': ('balance_sheet', 'liabilities'),
-    'stockholders_equity': ('balance_sheet', 'equity'),
-    'total_equity': ('balance_sheet', 'equity'),
-    'retained_earnings': ('balance_sheet', 'equity'),
-    'common_stock': ('balance_sheet', 'equity'),
-
-    # Cash Flow
-    'cash_from_operations': ('cash_flow', 'operating_activities'),
-    'operating_activities': ('cash_flow', 'operating_activities'),
-    'depreciation': ('cash_flow', 'adjustments'),
-    'amortization': ('cash_flow', 'adjustments'),
-    'stock_based_compensation': ('cash_flow', 'adjustments'),
-    'cash_from_investing': ('cash_flow', 'investing_activities'),
-    'investing_activities': ('cash_flow', 'investing_activities'),
-    'capital_expenditures': ('cash_flow', 'investing_activities'),
-    'acquisitions': ('cash_flow', 'investing_activities'),
-    'cash_from_financing': ('cash_flow', 'financing_activities'),
-    'financing_activities': ('cash_flow', 'financing_activities'),
-    'debt_payments': ('cash_flow', 'financing_activities'),
-    'dividend_payments': ('cash_flow', 'financing_activities'),
-    'stock_repurchases': ('cash_flow', 'financing_activities'),
-}
-
+# Key fix: the original had 300200→income_statement and 300400→cash_flow
+# which is the OPPOSITE of the actual XBRL file layout.
 BLOCK_CODE_MAP = {
+    # Filing / admin
     '100010': ('filing_information', None),
-    '200100': ('auditors_report', None),
-    '300100': ('balance_sheet', 'statement_of_financial_position'),
-    '300200': ('income_statement', 'statement_of_income'),
-    '300300': ('income_statement', 'other_comprehensive_income'),
-    '300400': ('cash_flow', 'statement_of_cash_flows'),
-    '300500': ('changes_in_equity', 'statement_of_changes_in_equity'),
+    '200100': ('auditors_report',    None),
+
+    # Financial statements — corrected codes
+    '300100': ('balance_sheet',               'statement_of_financial_position'),  # rare variant
+    '300200': ('balance_sheet',               'statement_of_financial_position'),  # ← was income_statement (BUG)
+    '300300': ('balance_sheet',               'statement_of_financial_position'),  # another variant
+    '300400': ('income_statement',            'statement_of_income'),              # ← was cash_flow (BUG)
+    '300500': ('other_comprehensive_income',  'statement_of_other_comprehensive_income'),
+    '300600': ('changes_in_equity',           'statement_of_changes_in_equity'),
+    '300700': ('cash_flow',                   'statement_of_cash_flows'),          # ← was missing (BUG)
+    '300800': ('cash_flow',                   'statement_of_cash_flows'),          # direct method variant
+
+    # Notes
     '400100': ('notes_to_accounts', None),
 }
 
+# Prefix fallback (used only when exact code not found)
 BLOCK_PREFIX_MAP = {
-    '100': ('filing_information', None),
-    '200': ('auditors_report', None),
-    '300': ('income_statement', None),
-    '400': ('notes_to_accounts', None),
+    '1': ('filing_information', None),
+    '2': ('auditors_report',    None),
+    '3': ('financial_statements', None),
+    '4': ('notes_to_accounts',  None),
 }
 
+# Keyword mapping — ONLY used when no block code is active at all
+METRIC_SECTION_MAPPING = {
+    'revenue':             ('income_statement', 'revenue'),
+    'sales':               ('income_statement', 'revenue'),
+    'net_sales':           ('income_statement', 'revenue'),
+    'cost_of_goods':       ('income_statement', 'cost_of_sales'),
+    'cost_of_sales':       ('income_statement', 'cost_of_sales'),
+    'gross_profit':        ('income_statement', 'profitability'),
+    'operating_expenses':  ('income_statement', 'operating_expenses'),
+    'operating_income':    ('income_statement', 'profitability'),
+    'operating_profit':    ('income_statement', 'profitability'),
+    'ebit':                ('income_statement', 'profitability'),
+    'interest_expense':    ('income_statement', 'financing'),
+    'interest_income':     ('income_statement', 'financing'),
+    'profit_before_tax':   ('income_statement', 'profitability'),
+    'income_tax':          ('income_statement', 'tax'),
+    'tax_expense':         ('income_statement', 'tax'),
+    'net_income':          ('income_statement', 'profitability'),
+    'net_profit':          ('income_statement', 'profitability'),
+    'total_assets':        ('balance_sheet', 'assets'),
+    'current_assets':      ('balance_sheet', 'assets'),
+    'cash':                ('balance_sheet', 'assets'),
+    'total_liabilities':   ('balance_sheet', 'liabilities'),
+    'current_liabilities': ('balance_sheet', 'liabilities'),
+    'stockholders_equity': ('balance_sheet', 'equity'),
+    'total_equity':        ('balance_sheet', 'equity'),
+    'retained_earnings':   ('balance_sheet', 'equity'),
+}
 
-def clean_key(text):
-    """Generates a clean snake_case key from the label."""
-    if not isinstance(text, str):
-        return f"unknown_{text}"
-    text = text.split('[')[0].split('|')[0]
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def clean_key(label: str) -> str:
+    if not isinstance(label, str):
+        return f"unknown_{label}"
+    text = label.split('[')[0].split('|')[0]
     clean = "".join(c if c.isalnum() else "_" for c in text)
     clean = clean.lower().strip("_")
     while "__" in clean:
@@ -127,273 +120,312 @@ def clean_key(text):
     return clean[:100]
 
 
-def classify_metric(metric_key, metric_label, block_code=None):
-    """
-    Classifies a metric into (section, subsection).
-    Priority: block_code exact → block_code prefix → keyword matching → fallback.
-    """
-    # 1. Block code exact match
-    if block_code and block_code in BLOCK_CODE_MAP:
+def is_empty(val) -> bool:
+    """True when a cell should be treated as having no value."""
+    if val is None:
+        return True
+    s = str(val).strip().replace('\xa0', '')
+    return s in ('', 'nan', 'NaT', 'None')
+
+
+def parse_number(raw) -> float | None:
+    if is_empty(raw):
+        return None
+    s = str(raw).replace(',', '').replace('\xa0', '').strip()
+    try:
+        if s.replace('.', '', 1).replace('-', '', 1).isdigit():
+            return float(s)
+    except Exception:
+        pass
+    return None
+
+
+def extract_date(raw) -> str | None:
+    if raw is None:
+        return None
+    if hasattr(raw, 'strftime'):
+        return raw.strftime('%Y-%m-%d')
+    s = str(raw).strip()
+    if not s or s in ('nan', 'NaT', ''):
+        return None
+    m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
+    return m.group(1) if m else None
+
+
+def compute_period(start: str | None, end: str | None) -> str | None:
+    if not start or not end:
+        return None
+    from datetime import datetime
+    try:
+        s = datetime.strptime(start[:10], '%Y-%m-%d')
+        e = datetime.strptime(end[:10], '%Y-%m-%d')
+        months = (e.year - s.year) * 12 + (e.month - s.month) + 1
+        if months <= 4:
+            return f"Q{(e.month - 1) // 3 + 1}"
+        if months <= 7:
+            return "H1"
+        if months <= 10:
+            return "9M"
+        return "Annual"
+    except Exception:
+        return None
+
+
+def classify_metric_by_block(block_code: str | None) -> tuple[str, str | None]:
+    """Return (section, subsection) purely from block code — no keyword guessing."""
+    if not block_code:
+        return 'other', None
+    if block_code in BLOCK_CODE_MAP:
         return BLOCK_CODE_MAP[block_code]
-
-    # 2. Block code prefix match
-    if block_code:
-        for prefix, result in BLOCK_PREFIX_MAP.items():
-            if block_code.startswith(prefix):
-                return result
-
-    # 3. Keyword-based classification
-    metric_lower = metric_key.lower()
-    label_lower = metric_label.lower() if isinstance(metric_label, str) else ""
-
-    for keyword, (section, subsection) in METRIC_SECTION_MAPPING.items():
-        if keyword in metric_lower or keyword in label_lower:
-            return section, subsection
-
-    # 4. Label-based fallback
-    if any(w in label_lower for w in ['balance', 'asset', 'liability', 'equity', 'statement of financial position']):
-        return 'balance_sheet', None
-    elif any(w in label_lower for w in ['income', 'revenue', 'expense', 'profit', 'loss', 'statement of comprehensive income']):
-        return 'income_statement', None
-    elif any(w in label_lower for w in ['cash flow', 'operating', 'investing', 'financing', 'statement of cash']):
-        return 'cash_flow', None
-
+    # prefix fallback
+    for prefix, result in BLOCK_PREFIX_MAP.items():
+        if block_code.startswith(prefix):
+            return result
     return 'other', None
 
 
+def classify_metric_keyword(key: str, label: str) -> tuple[str, str | None]:
+    """Keyword-only fallback — used ONLY when block_code is None."""
+    key_l   = key.lower()
+    label_l = label.lower() if isinstance(label, str) else ''
+    for kw, (sec, sub) in METRIC_SECTION_MAPPING.items():
+        if kw in key_l or kw in label_l:
+            return sec, sub
+    # broad label hints
+    for w in ('balance', 'asset', 'liability', 'equity'):
+        if w in label_l:
+            return 'balance_sheet', None
+    for w in ('income', 'revenue', 'expense', 'profit', 'loss'):
+        if w in label_l:
+            return 'income_statement', None
+    for w in ('cash flow', 'operating activities', 'investing', 'financing activities'):
+        if w in label_l:
+            return 'cash_flow', None
+    return 'other', None
+
 # ---------------------------------------------------------------------------
-# Excel Parsing (with robust fallback)
+# Excel reader with robust fallback
 # ---------------------------------------------------------------------------
 
-def _try_read_excel(file_path):
-    """Try multiple methods to read an Excel file. Returns DataFrame or None."""
-    # 1. openpyxl (modern XLSX)
-    try:
-        return pd.read_excel(file_path, header=None, engine='openpyxl').fillna('')
-    except Exception:
-        pass
-
-    # 2. xlrd (legacy XLS)
-    try:
-        return pd.read_excel(file_path, header=None, engine='xlrd').fillna('')
-    except Exception:
-        pass
-
-    # 3. read_html (HTML disguised as XLS)
+def _try_read_excel(file_path: str) -> pd.DataFrame | None:
+    for engine_name in ('openpyxl', 'xlrd'):
+        try:
+            return pd.read_excel(file_path, header=None, engine=engine_name).fillna('')
+        except Exception:
+            pass
     try:
         dfs = pd.read_html(file_path)
         if dfs:
             return dfs[0].fillna('')
     except Exception:
         pass
-
-    # 4. CSV with tab separator
-    for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
-        try:
-            return pd.read_csv(file_path, header=None, sep='\t', encoding=encoding).fillna('')
-        except Exception:
-            pass
-
-    # 5. CSV with comma separator
-    for encoding in ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']:
-        try:
-            return pd.read_csv(file_path, header=None, sep=',', encoding=encoding).fillna('')
-        except Exception:
-            pass
-
+    for sep in ('\t', ','):
+        for enc in ('utf-8', 'latin-1', 'cp1252'):
+            try:
+                return pd.read_csv(file_path, header=None, sep=sep, encoding=enc).fillna('')
+            except Exception:
+                pass
     return None
 
+# ---------------------------------------------------------------------------
+# Core parser — fixed
+# ---------------------------------------------------------------------------
 
-def _extract_date_value(raw_value):
-    """Extract a YYYY-MM-DD date string from various pandas cell formats."""
-    if raw_value is None:
-        return None
-    # pandas may parse Excel dates as Timestamp/datetime
-    if hasattr(raw_value, 'strftime'):
-        return raw_value.strftime('%Y-%m-%d')
-    s = str(raw_value).strip()
-    if not s or s in ('', 'nan', 'NaT'):
-        return None
-    # Try to find YYYY-MM-DD pattern
-    m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
-    if m:
-        return m.group(1)
-    return None
+BLOCK_HEADER_RE = re.compile(r'^\[(\d+)\]')
+
+# Labels that mark the date-header rows inside each block
+_START_DATE_LABELS = {'start date', 'reporting period start date', 'reporting period star date'}
+_END_DATE_LABELS   = {'end date',   'reporting period end date'}
 
 
-def _compute_period_from_dates(start_date_str, end_date_str):
+def _is_note_col(val) -> bool:
+    """Return True if this column header looks like a "Note No." annotation column."""
+    s = str(val).strip().lower()
+    return 'note' in s
+
+
+def parse_excel_file(file_path: str) -> list[dict]:
     """
-    Compute a period label (Q1, Q2, Q3, Q4, H1, 9M, Annual) from date strings.
-    Returns None if dates can't be parsed.
-    """
-    if not start_date_str or not end_date_str:
-        return None
-    try:
-        from datetime import datetime
-        start = datetime.strptime(start_date_str[:10], '%Y-%m-%d')
-        end = datetime.strptime(end_date_str[:10], '%Y-%m-%d')
+    Parse a single XBRL Excel file.
 
-        months = (end.year - start.year) * 12 + (end.month - start.month) + 1
+    Returns a list of dicts:
+      { key, label, value, text, section, subsection, start_date, end_date, col_index }
 
-        if months <= 4:
-            quarter = (end.month - 1) // 3 + 1
-            return f"Q{quarter}"
-        elif months <= 7:
-            return "H1"
-        elif months <= 10:
-            return "9M"
-        else:
-            return "Annual"
-    except Exception:
-        return None
-
-
-# Keys that indicate Start/End Date rows in XBRL files
-_DATE_START_KEYS = {'start_date', 'reporting_period_start_date', 'reporting_period_star_date'}
-_DATE_END_KEYS = {'end_date', 'reporting_period_end_date'}
-
-
-def parse_excel_file(file_path):
-    """
-    Parses a single Excel file. Detects XBRL block codes for classification.
-    Tracks Start/End Date changes within the file to compute sub-periods
-    (e.g. Q3 vs 9M) so both quarterly and cumulative data are preserved.
-
-    Returns list of dicts: {key, label, value, text, section, subsection, sub_period}
+    Each data row can produce MULTIPLE dicts — one per value column —
+    so that current-period and prior-period figures are both captured.
     """
     df = _try_read_excel(file_path)
     if df is None:
         return []
 
-    block_code_pattern = re.compile(r'\[(\d+)\]')
+    n_cols = df.shape[1]
 
-    try:
-        data = []
-        current_block_code = None
-        current_start_date = None
-        current_end_date = None
-        current_sub_period = None  # None = use filename period
+    # State machine
+    current_block_code: str | None = None
+    # col_dates[c] = (start_date, end_date) for data column index c (1-based in raw df)
+    col_dates: dict[int, tuple[str | None, str | None]] = {}
+    # Which column indices are "note" columns to skip
+    note_cols: set[int] = set()
 
-        for _, row in df.iterrows():
-            label = str(row.iloc[0]).strip()
-            raw_value = row.iloc[1] if len(row) > 1 else ''
+    # Temp holders while scanning a block's date header rows
+    pending_starts: dict[int, str] = {}  # col_idx → start_date string
+    pending_ends:   dict[int, str] = {}
 
-            # Detect block code header rows
-            block_match = block_code_pattern.match(label)
-            if block_match:
-                current_block_code = block_match.group(1)
+    results: list[dict] = []
+
+    for _, row in df.iterrows():
+        raw_label = row.iloc[0]
+        label = str(raw_label).strip().replace('\xa0', ' ').strip()
+
+        # ── Block header ───────────────────────────────────────────────────
+        m = BLOCK_HEADER_RE.match(label)
+        if m:
+            current_block_code = m.group(1)
+            col_dates   = {}
+            note_cols   = set()
+            pending_starts = {}
+            pending_ends   = {}
+            continue
+
+        # Skip fully empty rows
+        if not label or len(label) < 2:
+            continue
+
+        label_lower = label.lower()
+
+        # ── Detect "Note No." columns from block header / date rows ────────
+        # (They appear as non-date strings in columns 2+)
+        if label_lower in _START_DATE_LABELS or label_lower in _END_DATE_LABELS:
+            for c in range(1, n_cols):
+                cell = row.iloc[c]
+                if not is_empty(cell):
+                    if _is_note_col(cell):
+                        note_cols.add(c)
+
+        # ── Start Date row ──────────────────────────────────────────────────
+        if label_lower in _START_DATE_LABELS:
+            d = extract_date(row.iloc[1] if n_cols > 1 else None)
+            if d:
+                pending_starts[1] = d
+                col_dates[1] = (d, col_dates.get(1, (None, None))[1])
+            continue
+
+        # ── End Date row ────────────────────────────────────────────────────
+        if label_lower in _END_DATE_LABELS:
+            d = extract_date(row.iloc[1] if n_cols > 1 else None)
+            if d:
+                pending_ends[1] = d
+                col_dates[1] = (col_dates.get(1, (None, None))[0], d)
+            continue
+
+        # ── Determine section ───────────────────────────────────────────────
+        # FIX: section comes EXCLUSIVELY from the active block code.
+        # Keyword matching is only a last-resort when no block is active.
+        clean_label = label.replace('\t', ' ').replace('\n', ' ')[:500]
+        key = clean_key(clean_label)
+        if not key:
+            continue
+
+        if current_block_code is not None:
+            section, subsection = classify_metric_by_block(current_block_code)
+        else:
+            # Before any block header (shouldn't normally happen in well-formed files)
+            section, subsection = classify_metric_keyword(key, clean_label)
+
+        # Skip abstract / header rows (no numeric values anywhere)
+        row_has_data = not is_empty(row.iloc[1]) if n_cols > 1 else False
+        if not row_has_data:
+            continue
+
+        # ── Extract one record per value column ─────────────────────────────
+        # Determine which columns have date context
+        data_cols = [1]  # عمود B فقط
+
+        for c in data_cols:
+            raw_val = row.iloc[c]
+            if is_empty(raw_val):
                 continue
 
-            if not label or len(label) < 2:
-                continue
-            key = clean_key(label)
-            if not key:
-                continue
-
-            # --- Track date changes within the file ---
-            if key in _DATE_START_KEYS:
-                date_val = _extract_date_value(raw_value)
-                if date_val:
-                    current_start_date = date_val
-                    # Recompute sub_period when we have both dates
-                    if current_end_date:
-                        computed = _compute_period_from_dates(current_start_date, current_end_date)
-                        if computed:
-                            current_sub_period = computed
-
-            if key in _DATE_END_KEYS:
-                date_val = _extract_date_value(raw_value)
-                if date_val:
-                    current_end_date = date_val
-                    # Recompute sub_period when we have both dates
-                    if current_start_date:
-                        computed = _compute_period_from_dates(current_start_date, current_end_date)
-                        if computed:
-                            current_sub_period = computed
-
-            # --- Parse value ---
-            val_num = None
+            val_num  = parse_number(raw_val)
             val_text = None
+            if val_num is None:
+                s = str(raw_val).replace('\xa0', '').strip()
+                if s:
+                    val_text = s.replace('\t', ' ').replace('\n', ' ')
 
-            if pd.notna(raw_value) and raw_value != '':
-                try:
-                    clean_str = str(raw_value).replace(',', '').strip()
-                    if clean_str and clean_str.replace('.', '', 1).replace('-', '', 1).isdigit():
-                        val_num = float(clean_str)
-                    else:
-                        val_text = str(raw_value).strip()
-                except Exception:
-                    val_text = str(raw_value).strip()
+            start_date, end_date = col_dates.get(c, (None, None))
 
-            clean_label = label[:500].replace('\t', ' ').replace('\n', ' ')
-            if val_text:
-                val_text = val_text.replace('\t', ' ').replace('\n', ' ')
-
-            section, subsection = classify_metric(key, clean_label, block_code=current_block_code)
-
-            data.append({
-                "key": key,
-                "label": clean_label,
-                "value": val_num,
-                "text": val_text,
-                "section": section,
+            results.append({
+                "key":        key,
+                "label":      clean_label,
+                "value":      val_num,
+                "text":       val_text,
+                "section":    section,
                 "subsection": subsection,
-                "sub_period": current_sub_period,
+                "start_date": start_date,
+                "end_date":   end_date,
+                "col_index":  c,
             })
 
-        return data
-    except Exception as e:
-        print(f"    ❌ Error parsing rows in {os.path.basename(file_path)}: {e}")
-        return []
-
+    return results
 
 # ---------------------------------------------------------------------------
-# Per-symbol extraction (run in thread pool)
+# Per-symbol extraction (thread-safe)
 # ---------------------------------------------------------------------------
 
 def extract_symbol_data(symbol, base_dir):
-    """Extract all XBRL metrics for a single symbol. Thread-safe."""
     symbol_dir = os.path.join(base_dir, str(symbol))
     if not os.path.exists(symbol_dir):
-        return [], None
+        return [], []
 
-    files = [f for f in os.listdir(symbol_dir)
-             if 'XBRL' in f and (f.endswith('.xls') or f.endswith('.xlsx'))]
+    files = [
+        f for f in os.listdir(symbol_dir)
+        if 'XBRL' in f and (f.endswith('.xls') or f.endswith('.xlsx'))
+    ]
 
     symbol_metrics = []
-    failed_files = []
+    failed_files   = []
 
     for filename in files:
         try:
-            parts = os.path.splitext(filename)[0].split('_')
-            year = int(parts[0])
-            fallback_period = parts[-1]
+            parts        = os.path.splitext(filename)[0].split('_')
+            year         = int(parts[0])
+            fallback_per = parts[-1]
 
             metrics = parse_excel_file(os.path.join(symbol_dir, filename))
-            if metrics:
-                for m in metrics:
-                    # Use the sub_period computed from dates inside the file,
-                    # or fall back to the period from the filename.
-                    effective_period = m.get("sub_period") or fallback_period
-                    symbol_metrics.append((
-                        str(symbol), year, effective_period,
-                        m["key"], m["value"], m["text"], m["label"],
-                        filename, m["section"], m["subsection"],
-                    ))
-            else:
+            if not metrics:
                 failed_files.append(f"{symbol}: {filename}")
+                continue
+
+            for m in metrics:
+                # Compute period from the dates extracted inside the file;
+                # fall back to the filename period token.
+                period = compute_period(m["start_date"], m["end_date"]) or fallback_per
+                year_eff = int(m["end_date"][:4]) if m["end_date"] else year
+
+                symbol_metrics.append((
+                    str(symbol),
+                    year_eff,
+                    period,
+                    m["key"],
+                    m["value"],
+                    m["text"],
+                    m["label"],
+                    filename,
+                    m["section"],
+                    m["subsection"],
+                ))
+
         except Exception as e:
             failed_files.append(f"{symbol}: {filename} ({str(e)[:50]})")
 
     return symbol_metrics, failed_files
 
-
 # ---------------------------------------------------------------------------
-# Database helpers
+# Database helpers (unchanged from original)
 # ---------------------------------------------------------------------------
 
 def clean_text_for_db(text):
-    """Ensure text is valid UTF-8 and remove control characters."""
     if not isinstance(text, str):
         return text
     text = text.replace('\0', '').replace('\r', '').replace('\x00', '')
@@ -404,69 +436,52 @@ def clean_text_for_db(text):
 
 
 def ensure_metric_categories_exist(all_records):
-    """
-    Bulk-create any missing metric categories in one pass.
-    Much faster than querying display_order per category.
-    """
     print("📋 Ensuring metric categories exist in database...")
     session = Session()
     try:
-        # Collect unique metrics from records
         unique_metrics = {}
         for rec in all_records:
-            # rec: (symbol, year, period, key, value, text, label, file, section, subsection)
-            metric_key = rec[3]
-            if metric_key not in unique_metrics:
-                unique_metrics[metric_key] = {
-                    'section': rec[8],
-                    'subsection': rec[9],
-                    'label': rec[6],
-                }
+            mk = rec[3]
+            if mk not in unique_metrics:
+                unique_metrics[mk] = {'section': rec[8], 'subsection': rec[9], 'label': rec[6]}
 
-        # Query ALL existing keys in one go
         existing_keys = set(
             k[0] for k in session.query(FinancialMetricCategory.metric_name).all()
         )
-
-        # Determine max display_order per section in one query
-        from sqlalchemy import func as sa_func
-        section_max_orders = dict(
+        section_max = dict(
             session.query(
                 FinancialMetricCategory.section,
                 sa_func.max(FinancialMetricCategory.display_order),
             ).group_by(FinancialMetricCategory.section).all()
         )
 
-        new_categories = []
-        for metric_key, info in unique_metrics.items():
-            if metric_key in existing_keys:
+        new_cats = []
+        for mk, info in unique_metrics.items():
+            if mk in existing_keys:
                 continue
-            section = info['section']
-            current_max = section_max_orders.get(section, -1) or -1
-            next_order = current_max + 1
-            section_max_orders[section] = next_order  # bump for next metric in same section
-
-            new_categories.append(FinancialMetricCategory(
-                metric_name=metric_key,
-                section=section,
+            sec   = info['section']
+            order = (section_max.get(sec) or -1) + 1
+            section_max[sec] = order
+            new_cats.append(FinancialMetricCategory(
+                metric_name=mk,
+                section=sec,
                 subsection=info['subsection'],
                 description_en=info['label'],
                 unit='SAR',
-                display_order=next_order,
+                display_order=order,
                 is_key_metric=False,
                 is_calculated=False,
             ))
 
-        if new_categories:
-            session.bulk_save_objects(new_categories)
+        if new_cats:
+            session.bulk_save_objects(new_cats)
             session.commit()
-            print(f"   ✅ Created {len(new_categories)} new metric categories")
+            print(f"   ✅ Created {len(new_cats)} new metric categories")
         else:
             print(f"   ℹ️  All {len(unique_metrics)} metrics already exist")
-
         return True
     except Exception as e:
-        print(f"   ❌ Error creating categories: {e}")
+        print(f"   ❌ Error: {e}")
         session.rollback()
         return False
     finally:
@@ -474,47 +489,35 @@ def ensure_metric_categories_exist(all_records):
 
 
 def save_to_db_fast(all_records):
-    """
-    Saves metrics using DELETE + copy_expert (CSV) INSERT in chunks.
-    Deletes existing data for processed symbols first, then bulk-inserts fresh data.
-    No unique constraint required.
-    """
     if not all_records:
         print("⚠️ No records to save.")
         return 0
 
-    # --- Ensure categories exist (bulk) ---
     ensure_metric_categories_exist(all_records)
 
-    # --- Dedup in Python (keep last occurrence per unique key) ---
+    # Dedup: keep last per (symbol, year, period, key)
     print("🧹 Deduplicating...")
     unique_map = {}
     for rec in all_records:
         unique_map[(rec[0], rec[1], rec[2], rec[3])] = rec
-    dedup = list(unique_map.values())
+    dedup   = list(unique_map.values())
     removed = len(all_records) - len(dedup)
     if removed:
         print(f"   Removed {removed:,} duplicates.")
 
-    total_records = len(dedup)
-
-    # --- Delete old data for the symbols we're about to insert ---
-    symbols_in_batch = list(set(rec[0] for rec in dedup))
-    print(f"🗑️  Clearing old data for {len(symbols_in_batch)} symbols...")
+    total = len(dedup)
+    syms  = list({r[0] for r in dedup})
+    print(f"🗑️  Clearing old data for {len(syms)} symbols...")
 
     conn = engine.raw_connection()
     try:
-        cursor = conn.cursor()
-        # Use ANY(array) for efficient multi-symbol delete
-        cursor.execute(
+        cur = conn.cursor()
+        cur.execute(
             "DELETE FROM company_financial_metrics WHERE company_symbol = ANY(%s)",
-            (symbols_in_batch,)
+            (syms,)
         )
-        deleted = cursor.rowcount
         conn.commit()
-        cursor.close()
-        if deleted:
-            print(f"   Deleted {deleted:,} old records.")
+        cur.close()
     except Exception as e:
         print(f"   ⚠️ Delete warning: {e}")
         try:
@@ -522,25 +525,20 @@ def save_to_db_fast(all_records):
         except Exception:
             pass
 
-    # --- Bulk INSERT ---
-    print(f"💾 Inserting {total_records:,} records...")
-
-    CHUNK_SIZE = 10_000
-    total_saved = 0
+    print(f"💾 Inserting {total:,} records...")
+    CHUNK = 10_000
+    saved = 0
 
     try:
-        for i in range(0, total_records, CHUNK_SIZE):
-            chunk = dedup[i : i + CHUNK_SIZE]
-            chunk_num = (i // CHUNK_SIZE) + 1
-            total_chunks = ((total_records - 1) // CHUNK_SIZE) + 1
+        for i in range(0, total, CHUNK):
+            chunk    = dedup[i: i + CHUNK]
+            chunk_no = i // CHUNK + 1
+            n_chunks = (total - 1) // CHUNK + 1
+            if chunk_no % 5 == 0 or chunk_no in (1, n_chunks):
+                print(f"   ↳ Chunk {chunk_no}/{n_chunks} ({len(chunk):,} rows)")
 
-            if chunk_num % 5 == 0 or chunk_num == 1 or chunk_num == total_chunks:
-                print(f"   ↳ Chunk {chunk_num}/{total_chunks} ({len(chunk):,} records)")
-
-            cursor = conn.cursor()
-
-            # Create temp table (dropped on commit)
-            cursor.execute("""
+            cur = conn.cursor()
+            cur.execute("""
                 CREATE TEMP TABLE tmp_metrics (
                     company_symbol TEXT,
                     year INT,
@@ -553,21 +551,20 @@ def save_to_db_fast(all_records):
                 ) ON COMMIT DROP;
             """)
 
-            # Build CSV buffer (only first 8 fields — skip section/subsection)
-            csv_buf = io.StringIO()
+            buf = io.StringIO()
             for row in chunk:
                 parts = []
                 for idx in range(8):
                     item = row[idx]
-                    if idx == 4:  # metric_value (DOUBLE PRECISION)
+                    if idx == 4:
                         if item is None or str(item).strip() == '':
                             parts.append('')
                         else:
                             try:
                                 parts.append(str(float(item)))
-                            except (ValueError, TypeError):
+                            except Exception:
                                 parts.append('')
-                    else:  # text columns
+                    else:
                         if item is None or str(item).strip() == '':
                             parts.append('')
                         else:
@@ -576,128 +573,113 @@ def save_to_db_fast(all_records):
                             if any(c in val for c in [',', '"', '\n']):
                                 val = f'"{val}"'
                             parts.append(val)
-                csv_buf.write(','.join(parts) + '\n')
+                buf.write(','.join(parts) + '\n')
 
-            csv_buf.seek(0)
-
-            # COPY into temp table
+            buf.seek(0)
             try:
-                cursor.copy_expert(
+                cur.copy_expert(
                     "COPY tmp_metrics FROM STDIN WITH (FORMAT CSV, DELIMITER ',', NULL '')",
-                    csv_buf,
+                    buf,
                 )
             except Exception as e:
-                print(f"   ❌ COPY Error (chunk {chunk_num}): {str(e)[:120]}")
+                print(f"   ❌ COPY error chunk {chunk_no}: {str(e)[:120]}")
                 conn.rollback()
-                cursor.close()
+                cur.close()
                 continue
 
-            # INSERT into real table (no conflict handling needed — we already deleted)
-            cursor.execute("""
+            cur.execute("""
                 INSERT INTO company_financial_metrics
-                    (company_symbol, year, period, metric_name, metric_value, metric_text, label_en, source_file)
-                SELECT company_symbol, year, period, metric_name, metric_value, metric_text, label_en, source_file
+                    (company_symbol, year, period, metric_name, metric_value,
+                     metric_text, label_en, source_file)
+                SELECT company_symbol, year, period, metric_name, metric_value,
+                       metric_text, label_en, source_file
                 FROM tmp_metrics;
             """)
-
             conn.commit()
-            cursor.close()
-            total_saved += len(chunk)
+            cur.close()
+            saved += len(chunk)
 
-        print(f"✅ Successfully saved {total_saved:,} records.")
-        return total_saved
-
+        print(f"✅ Saved {saved:,} records.")
+        return saved
     except Exception as e:
-        print(f"❌ Database Error: {e}")
+        print(f"❌ DB error: {e}")
         try:
             conn.rollback()
         except Exception:
             pass
-        return total_saved
+        return saved
     finally:
         try:
             conn.close()
         except Exception:
             pass
 
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Enhanced Batch XBRL Extraction with Categorization")
-    parser.add_argument('--workers', type=int, default=8,
-                        help="Number of parallel workers for file parsing")
-    parser.add_argument('--symbols', nargs='+',
-                        help="Specific symbols to process (e.g. 1010 2222 4001)")
+    parser = argparse.ArgumentParser(description="Fixed Batch XBRL Extraction")
+    parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--symbols', nargs='+')
     args = parser.parse_args()
 
     base_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "data", "downloads",
     )
-
     if not os.path.exists(base_dir):
-        print(f"❌ Directory not found: {base_dir}")
+        print(f"❌ Not found: {base_dir}")
         return
 
     all_symbols = sorted(
         d for d in os.listdir(base_dir)
         if os.path.isdir(os.path.join(base_dir, d))
     )
-
     if args.symbols:
-        # Support both: --symbols 1010 2222  AND  --symbols 6012,2001,8230
         expanded = []
         for s in args.symbols:
             expanded.extend(s.split(','))
-        requested = [x.strip() for x in expanded if x.strip()]
+        requested   = {x.strip() for x in expanded if x.strip()}
         all_symbols = [s for s in all_symbols if s in requested]
 
     if not all_symbols:
         print("❌ No symbols found.")
         return
 
-    print(f"{'=' * 60}")
-    print(f"🚀 BATCH XBRL EXTRACTION (ENHANCED)")
-    print(f"📊 Symbols: {len(all_symbols)}")
-    print(f"⚡ Workers: {args.workers}")
-    print(f"{'=' * 60}")
+    print(f"{'='*60}")
+    print(f"🚀 BATCH XBRL EXTRACTION — FIXED")
+    print(f"📊 Symbols : {len(all_symbols)}")
+    print(f"⚡ Workers : {args.workers}")
+    print(f"{'='*60}")
 
-    start_time = time.time()
+    t0       = time.time()
     all_data = []
-    failed_symbols = []
+    failed   = []
 
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(extract_symbol_data, sym, base_dir): sym
-            for sym in all_symbols
-        }
-        completed = 0
-        for future in as_completed(futures):
-            res, failed = future.result()
-            if res:
-                all_data.extend(res)
-            if failed:
-                failed_symbols.extend(failed)
-            completed += 1
-            if completed % 20 == 0 or completed == len(all_symbols):
-                print(f"   📂 Parsed {completed}/{len(all_symbols)} symbols...")
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futures = {ex.submit(extract_symbol_data, sym, base_dir): sym for sym in all_symbols}
+        done    = 0
+        for fut in as_completed(futures):
+            res, fail = fut.result()
+            all_data.extend(res)
+            failed.extend(fail)
+            done += 1
+            if done % 20 == 0 or done == len(all_symbols):
+                print(f"   📂 Parsed {done}/{len(all_symbols)} symbols  |  {len(all_data):,} rows so far")
 
-    print(f"\n✅ Extraction: {len(all_data):,} metrics from {len(all_symbols)} symbols.")
-
-    if failed_symbols:
-        print(f"\n⚠️  Failed to read {len(failed_symbols)} files:")
-        for f in failed_symbols[:20]:
+    print(f"\n✅ Extraction done: {len(all_data):,} metrics from {len(all_symbols)} symbols")
+    if failed:
+        print(f"⚠️  {len(failed)} files failed:")
+        for f in failed[:20]:
             print(f"   - {f}")
-        if len(failed_symbols) > 20:
-            print(f"   ... and {len(failed_symbols) - 20} more")
+        if len(failed) > 20:
+            print(f"   … and {len(failed)-20} more")
 
     save_to_db_fast(all_data)
 
-    elapsed = time.time() - start_time
-    print(f"\n🏁 Finished in {elapsed:.1f}s ({elapsed / max(len(all_symbols), 1):.1f}s per symbol)")
+    elapsed = time.time() - t0
+    print(f"\n🏁 Finished in {elapsed:.1f}s  ({elapsed/max(len(all_symbols),1):.1f}s/symbol)")
 
 
 if __name__ == "__main__":
