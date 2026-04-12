@@ -118,6 +118,20 @@ class RedisCache:
             print(f"❌ خطأ في SCAN: {e}")
             return []
 
+    async def publish(self, channel: str, message: str) -> int:
+        if not await self.ensure_connection():
+            return 0
+        try:
+            return await self.redis_client.publish(channel, message)
+        except Exception as e:
+            print(f"❌ خطأ في النشر (Publish): {e}")
+            return 0
+
+    async def pubsub(self):
+        if not await self.ensure_connection():
+            return None
+        return self.redis_client.pubsub()
+
 redis_cache = RedisCache()
 
 async def store_reset_token(user_id: int, token: str, expire_minutes: int = 15):

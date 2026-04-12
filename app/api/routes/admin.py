@@ -62,6 +62,9 @@ async def approve_user(
     
     db.commit()
     
+    # Notify connected SSE clients
+    await redis_cache.publish(f"user_approval_{user.id}", "approved")
+    
     # Send email notification could go here
     
     return {"message": f"User {user.email} approved successfully"}

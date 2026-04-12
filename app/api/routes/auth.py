@@ -41,6 +41,7 @@ import secrets
 import hashlib
 import base64
 import asyncio
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from app.core.limiter import limiter
 
@@ -137,22 +138,35 @@ async def consume_oauth_state(provider: str, state: str):
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 @limiter.limit("5/minute")
 async def register(request: Request, user: UserRegister, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    validate_password_strength(user.password)
+
+    unified_message = "تم استلام الطلب. إذا لم يكن البريد مسجلاً مسبقاً، ستتلقى رسالة لتأكيد البريد الإلكتروني."
+
     # التحقق من وجود المستخدم
     db_user = db.query(User).filter(User.email == user.email).first()
     if db_user:
-        raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجل بالفعل")
-    
-    validate_password_strength(user.password)
-    
-    
+        # Anti-enumeration: return fake success
+        return JSONResponse(
+            status_code=201,
+            content={
+                "message": unified_message,
+                "user": {
+                    "id": 0,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "is_approved": False,
+                }
+            }
+        )
+
     # إنشاء المستخدم
     hashed_password = get_password_hash(user.password)
     db_user = User(
         email=user.email, 
         hashed_password=hashed_password, 
         full_name=user.full_name,
-        is_verified=False, # Ensure user is not verified initially
-        is_approved=False  # Must be approved by admin
+        is_verified=False,
+        is_approved=False
     )
     db.add(db_user)
     db.commit()
@@ -174,7 +188,7 @@ async def register(request: Request, user: UserRegister, background_tasks: Backg
         
         background_tasks.add_task(send_email, db_user.email, "تأكيد البريد الإلكتروني - LUMIVST", email_body)
     except Exception as e:
-        print(f"⚠️ Failed to queue verification email: {e}")
+        logger.warning("Failed to queue verification email: %s", e)
     
     # Create pending token for polling approval status
     temp_token = create_access_token(data={
@@ -189,7 +203,7 @@ async def register(request: Request, user: UserRegister, background_tasks: Backg
     register_response = JSONResponse(
         status_code=201,
         content={
-            "message": "تم إنشاء الحساب بنجاح. الحساب بانتظار موافقة الإدارة وتأكيد البريد الإلكتروني.",
+            "message": unified_message,
             "user": {
                 "id": db_user.id,
                 "email": db_user.email,
@@ -204,28 +218,18 @@ async def register(request: Request, user: UserRegister, background_tasks: Backg
 @router.post("/refresh-token")
 async def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
     refresh_token = request.cookies.get("refresh_token")
-    user_id = None
-    token_jti = None
 
-    if refresh_token:
-        payload = decode_token(refresh_token)
-        if payload.get("type") != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid refresh token type")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh token missing")
 
-        user_id = int(payload.get("sub"))
-        token_jti = payload.get("jti")
-        if not await verify_refresh_token_exists(user_id, refresh_token):
-            raise HTTPException(status_code=401, detail="Refresh token expired or revoked")
-    else:
-        # Backward-compatible fallback for pending-approval flow using bearer access token.
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="Refresh token missing")
-        access_token = auth_header.split(" ", 1)[1].strip()
-        payload = decode_token(access_token)
-        user_id = int(payload.get("sub"))
-        if not await verify_token_exists(user_id, access_token):
-            raise HTTPException(status_code=401, detail="Access token expired or revoked")
+    payload = decode_token(refresh_token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid refresh token type")
+
+    user_id = int(payload.get("sub"))
+    token_jti = payload.get("jti")
+    if not await verify_refresh_token_exists(user_id, refresh_token):
+        raise HTTPException(status_code=401, detail="Refresh token expired or revoked")
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -239,7 +243,6 @@ async def refresh_token(request: Request, response: Response, db: Session = Depe
     set_auth_cookies(response, access_token, new_refresh_token)
 
     return {
-        "access_token": access_token,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -298,7 +301,6 @@ async def login(request: Request, response: Response, user: UserLogin, db: Sessi
         set_auth_cookies(response, access_token, refresh_token)
         
         return {
-            "access_token": access_token, 
             "token_type": "bearer",
             "user": {
                 "id": db_user.id,
@@ -380,8 +382,7 @@ async def update_profile(
     
     # Only update password if provided and not empty
     if user_update.password:
-        if len(user_update.password) < 8:
-            raise HTTPException(status_code=400, detail="كلمة المرور يجب أن تكون 8 أحرف على الأقل")
+        validate_password_strength(user_update.password)
         db_user.hashed_password = get_password_hash(user_update.password)
         
     db.commit()
@@ -505,7 +506,6 @@ async def activate_session(request: Request, db: Session = Depends(get_db)):
         await invalidate_token(user_id, pending_jti)
 
     response = JSONResponse(content={
-        "access_token": access_token,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -517,10 +517,9 @@ async def activate_session(request: Request, db: Session = Depends(get_db)):
         }
     })
     set_auth_cookies(response, access_token, refresh_token)
-    # Clear the pending token cookie
+    # Clear the pending token cookie (must match creation attributes)
     is_secure = settings.ENVIRONMENT.lower() == "production"
-    cookie_samesite = "none" if is_secure else "lax"
-    response.delete_cookie("pending_token", path="/", secure=is_secure, httponly=True, samesite=cookie_samesite)
+    response.delete_cookie("pending_token", path="/", secure=is_secure, httponly=True, samesite="lax")
     return response
 
 @router.get("/pending-status/check")
@@ -555,13 +554,37 @@ async def pending_status_stream(request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Pending token expired")
 
     async def event_generator():
-        while True:
-            user = db.query(User).filter(User.id == user_id).first()
-            approved = bool(user and user.is_approved)
-            yield f"data: {{\"approved\": {str(approved).lower()}}}\n\n"
-            if approved:
-                break
-            await asyncio.sleep(10)
+        # Initial DB check to avoid race conditions
+        user = db.query(User).filter(User.id == user_id).first()
+        approved = bool(user and user.is_approved)
+        yield f"data: {{\"approved\": {str(approved).lower()}}}\n\n"
+
+        if approved:
+            return
+
+        pubsub = await redis_cache.pubsub()
+        if not pubsub:
+            # Fallback to polling if Redis Pub/Sub unavailable
+            while True:
+                await asyncio.sleep(10)
+                user = db.query(User).filter(User.id == user_id).first()
+                approved = bool(user and user.is_approved)
+                yield f"data: {{\"approved\": {str(approved).lower()}}}\n\n"
+                if approved:
+                    break
+            return
+
+        try:
+            channel_name = f"user_approval_{user_id}"
+            await pubsub.subscribe(channel_name)
+            async for message in pubsub.listen():
+                if message['type'] == 'message':
+                    if message['data'] == 'approved':
+                        yield f"data: {{\"approved\": true}}\n\n"
+                        break
+        finally:
+            await pubsub.unsubscribe(channel_name)
+            await pubsub.close()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -697,20 +720,18 @@ async def google_callback(request: Request, code: str, state: str, response: Res
                         "is_verified": user.is_verified,
                         "is_approved": user.is_approved,
                         "is_admin": user.is_admin
-                    },
-                    "temp_token": temp_token  # Limited token for checking status
+                    }
                 }
             )
             set_pending_cookie(pending_response, temp_token)
             return pending_response
-            
+
 
         # Create JWT for approved users
         access_token, refresh_token = await create_and_store_tokens(user)
         set_auth_cookies(response, access_token, refresh_token)
 
         return {
-            "access_token": access_token,
             "token_type": "bearer",
             "user": {
                 "id": user.id,
@@ -833,8 +854,7 @@ async def facebook_callback(request: Request, code: str, state: str, response: R
                         "is_verified": user.is_verified,
                         "is_approved": user.is_approved,
                         "is_admin": user.is_admin
-                    },
-                    "temp_token": temp_token  # Limited token for checking status
+                    }
                 }
             )
             set_pending_cookie(pending_response, temp_token)
@@ -845,7 +865,6 @@ async def facebook_callback(request: Request, code: str, state: str, response: R
         set_auth_cookies(response, jwt_token, refresh_token)
 
         return {
-            "access_token": jwt_token,
             "token_type": "bearer",
             "user": {
                 "id": user.id,

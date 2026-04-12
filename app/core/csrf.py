@@ -39,7 +39,8 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                         except Exception:
                             origin_valid = False
                     else:
-                        origin_valid = True
+                        # Fail-closed: missing both Origin and Referer means invalid source
+                        origin_valid = False
 
                     if not origin_valid:
                         return JSONResponse(

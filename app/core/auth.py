@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from uuid import uuid4
 import hashlib
+import logging
 import os
 import secrets
 
@@ -8,6 +9,8 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+
+logger = logging.getLogger(__name__)
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
@@ -81,9 +84,9 @@ async def store_token_in_redis(user_id: int, token: str):
                 expire=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
             )
         else:
-            print("⚠️ Failed to store token in Redis")
+            logger.warning("Failed to store token in Redis")
     except Exception as e:
-        print(f"⚠️ Warning: Could not store token in Redis: {e}")
+        logger.warning("Could not store token in Redis: %s", e)
 
 
 async def store_refresh_token_in_redis(user_id: int, token: str):
@@ -105,7 +108,7 @@ async def store_refresh_token_in_redis(user_id: int, token: str):
                 expire=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
             )
     except Exception as e:
-        print(f"⚠️ Warning: Could not store refresh token in Redis: {e}")
+        logger.warning("Could not store refresh token in Redis: %s", e)
 
 
 async def invalidate_token(user_id: int, token_jti: str | None = None):
@@ -121,7 +124,7 @@ async def invalidate_token(user_id: int, token_jti: str | None = None):
             await redis_cache.delete(f"access_token:{jti}")
             await redis_cache.delete(key)
     except Exception as e:
-        print(f"⚠️ Warning: Could not invalidate token in Redis: {e}")
+        logger.warning("Could not invalidate token in Redis: %s", e)
 
 
 async def invalidate_refresh_token(user_id: int, token_jti: str | None = None):
@@ -137,7 +140,7 @@ async def invalidate_refresh_token(user_id: int, token_jti: str | None = None):
             await redis_cache.delete(f"refresh_token:{jti}")
             await redis_cache.delete(key)
     except Exception as e:
-        print(f"⚠️ Warning: Could not invalidate refresh token in Redis: {e}")
+        logger.warning("Could not invalidate refresh token in Redis: %s", e)
 
 
 async def verify_token_exists(user_id: int, token: str) -> bool:

@@ -1,9 +1,12 @@
 # app/core/config.py
 
+import logging
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class Settings:
     def __init__(self):
@@ -22,6 +25,11 @@ class Settings:
         allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,https://www.rebh.ai,https://rebh.ai")
         if self.DEBUG:
             self.ALLOWED_ORIGINS = ["*"]
+            logger.warning(
+                "SECURITY: DEBUG=True sets ALLOWED_ORIGINS=['*']. "
+                "This is incompatible with allow_credentials=True in production. "
+                "Never deploy with DEBUG=True."
+            )
         else:
             self.ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_str.split(",")]
             self.ALLOWED_ORIGINS.extend(["https://lumivst-backend-v2.onrender.com", "https://lumivst.onrender.com"])
