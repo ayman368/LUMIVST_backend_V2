@@ -1,0 +1,260 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+import time
+from datetime import datetime, timedelta
+import json
+import logging
+
+from app.core.database import SessionLocal
+from app.models.economic_indicators import EconomicIndicator
+
+logger = logging.getLogger(__name__)
+
+def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = None):
+    """
+    Generic scraper for GuruFocus indicators using Selenium.
+    Example: 
+      url: https://www.gurufocus.com/economic_indicators/57/sp-500-pe-ratio
+      indicator_code: SP500_PE
+    """
+    logger.info(f"🚀 Starting GuruFocus Scraper for {indicator_code}...")
+
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--window-size=1920,1080")
+    # Add User Agent to prevent basic bot blocking
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    driver = webdriver.Chrome(options=options)
+    
+    try:
+        driver.get(url)
+        logger.info("⏳ Waiting for the historical data table to load...")
+        
+        # Wait until the history table is present (Checking for rows)
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//table//tr[td[contains(text(), '-')]]"))
+        )
+        
+        time.sleep(3) # Wait for page hydration
+        
+        # 1. Attempt to extract ALL Historical Data directly from the global Javascript state (__NUXT__ or similar)
+        logger.info("🕵️‍♂️ Attempting to extract full history from JS window object (__NUXT__)...")
+        
+        extract_script = """
+        function findSeries(obj, depth) {
+            if(depth > 12 || !obj) return [];
+            var best = [];
+            if(Array.isArray(obj)) {
+                // Check if this array is our target: array of arrays [timestamp, value]
+                if(obj.length > 50 && Array.isArray(obj[0]) && obj[0].length >= 2 && typeof obj[0][0] === 'number' && obj[0][0] > 10000000000) {
+                    return obj;
+                }
+                for(var i=0; i<obj.length; i++) {
+                    var res = findSeries(obj[i], depth+1);
+                    if(res.length > best.length) best = res;
+                }
+            } else if(typeof obj === 'object') {
+                for(var k in obj) {
+                    var res = findSeries(obj[k], depth+1);
+                    if(res.length > best.length) best = res;
+                }
+            }
+            return best;
+        }
+        
+        try {
+            var data1 = findSeries(window.__NUXT__, 0);
+            if(data1 && data1.length > 100) return data1;
+            
+            var data2 = findSeries(window.Highcharts, 0);
+            if(data2 && data2.length > 100) return data2;
+            
+            return null;
+        } catch(e) { return null; }
+        """
+        
+        chart_data = driver.execute_script(extract_script)
+        
+        data_records = []
+        if chart_data and isinstance(chart_data, list) and len(chart_data) > 20:
+            logger.info(f"✅ Extracted {len(chart_data)} records directly from the hidden Javascript state!")
+            for point in chart_data:
+                try:
+                    ts, val = point[0], point[1]
+                    if val is not None:
+                        # Some timestamps are in seconds, some in milliseconds
+                        ts_val = ts / 1000.0 if ts > 100000000000 else ts
+                        dt = datetime.fromtimestamp(ts_val).date()
+                        data_records.append({"date": dt, "value": float(val)})
+                except Exception as e:
+                    continue
+        else:
+            logger.warning("⚠️ Deep extraction failed. Falling back to parsing ALL pages of the HTML table via pagination.")
+            data_records_dict = {} # Use dict to ensure uniqueness by date: {date: {value, yoy}}
+            
+            page_num = 1
+            while True:
+                # Fallback to simple table scraping
+                html = driver.page_source
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                tables = soup.find_all("table")
+                target_table = None
+                for table in tables:
+                    headers = [th.text.strip().lower() for th in table.find_all("th")]
+                    # Must match "Historical Data" table (has "yoy") NOT "Related Indicators" table
+                    if "date" in headers and "value" in headers and any("yoy" in h for h in headers):
+                        target_table = table
+                        break
+                        
+                if target_table:
+                    rows = target_table.find("tbody").find_all("tr")
+                    for row in rows:
+                        cols = row.find_all("td")
+                        if len(cols) >= 2:
+                            date_str = cols[0].text.strip()
+                            val_str = cols[1].text.strip().replace('%', '')
+                            # Capture YOY column (3rd column) if available
+                            yoy_val = None
+                            if len(cols) >= 3:
+                                yoy_str = cols[2].text.strip().replace('%', '').replace('+', '')
+                                try:
+                                    yoy_val = float(yoy_str)
+                                except:
+                                    yoy_val = None
+                            try:
+                                dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+                                val = float(val_str)
+                                data_records_dict[dt] = {"value": val, "yoy": yoy_val}
+                            except Exception as e:
+                                continue
+                                
+                logger.info(f"📄 Parsed page {page_num}... Total unique records so far: {len(data_records_dict)}")
+                
+                # Check if we reached the maximum pages requested
+                if max_pages and page_num >= max_pages:
+                    logger.info(f"🛑 Reached max_pages limit ({max_pages}). Stopping pagination for incremental update.")
+                    break
+                
+                # Check for Next button to go to the next page
+                try:
+                    # Close any random popups that might appear and block the DOM
+                    try:
+                        close_btn = driver.find_element(By.CSS_SELECTOR, "i.el-icon-close")
+                        driver.execute_script("arguments[0].click();", close_btn)
+                    except:
+                        pass
+                        
+                    # GuruFocus uses Element UI or similar class 'btn-next' for pagination
+                    next_btn = driver.find_element(By.CSS_SELECTOR, "button.btn-next")
+                    
+                    # If button is disabled or we hit the end
+                    if next_btn.get_attribute("disabled"):
+                        logger.info("Next button is disabled. Reached the end of pagination.")
+                        break
+                        
+                    # Click next page via Javascript to avoid overlay issues
+                    driver.execute_script("arguments[0].click();", next_btn)
+                    
+                    import random
+                    sleep_time = 1.5 + random.uniform(0.5, 1.5)
+                    time.sleep(sleep_time) # Wait for table to reload with a bit of jitter
+                    page_num += 1
+                    
+                    # Failsafe if it loops > 2000 pages
+                    if page_num > 2000:
+                        break
+                except Exception as e:
+                    logger.warning(f"Stopped pagination at page {page_num}. Reason: {str(e)[:100]}")
+                    break
+                    
+            # Calculate YOY manually as requested: YoY = ((Current - LastYear) / LastYear) * 100
+            sorted_dates = sorted(data_records_dict.keys())
+            for dt in sorted_dates:
+                current_value = data_records_dict[dt]["value"]
+                
+                # Target exact same calendar date last year
+                try:
+                    target_date = dt.replace(year=dt.year - 1)
+                except ValueError:
+                    # Handles Feb 29 on leap years -> fallback to Feb 28
+                    target_date = dt.replace(year=dt.year - 1, day=28)
+                
+                # Find the closest date available in our dataset on or before the target date
+                last_year_value = None
+                for i in range(10): # Check up to 10 days before target date
+                    check_date = target_date - timedelta(days=i)
+                    if check_date in data_records_dict:
+                        last_year_value = data_records_dict[check_date]["value"]
+                        break
+                        
+                if last_year_value and last_year_value != 0:
+                    yoy = ((current_value - last_year_value) / last_year_value) * 100
+                    # Round to 2 decimal places
+                    data_records_dict[dt]["yoy"] = round(yoy, 2)
+                else:
+                    data_records_dict[dt]["yoy"] = None
+
+            # Convert dict back to list format expected by the next steps
+            for dt, record in data_records_dict.items():
+                data_records.append({"date": dt, "value": record["value"], "yoy": record["yoy"]})
+                    
+        if not data_records:
+            logger.warning("⚠️ No valid records parsed from table.")
+            return False
+            
+        logger.info(f"✅ Successfully parsed {len(data_records)} records.")
+        
+        # Save to Database (UPSERT: insert new + update existing with YOY)
+        db = SessionLocal()
+        try:
+            existing_records = {
+                r.report_date: r for r in db.query(EconomicIndicator).filter(EconomicIndicator.indicator_code == indicator_code).all()
+            }
+            
+            new_objs = []
+            updated_count = 0
+            for record in data_records:
+                if record["date"] in existing_records:
+                    # Update existing record with YOY if we have it and it's missing
+                    existing = existing_records[record["date"]]
+                    yoy_val = record.get("yoy")
+                    if yoy_val is not None and existing.yoy_pct != yoy_val:
+                        existing.yoy_pct = yoy_val
+                        updated_count += 1
+                else:
+                    new_objs.append(EconomicIndicator(
+                        report_date=record["date"],
+                        indicator_code=indicator_code,
+                        value=record["value"],
+                        yoy_pct=record.get("yoy")
+                    ))
+            
+            if new_objs:
+                db.bulk_save_objects(new_objs)
+            
+            db.commit()
+            logger.info(f"💾 Inserted {len(new_objs)} NEW records. Updated YOY for {updated_count} existing records.")
+        finally:
+            db.close()
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Scraper Failed: {e}")
+        return False
+    finally:
+        driver.quit()
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    scrape_gurufocus_sp500_ey = None
+    scrape_gurufocus_sp500_ey()

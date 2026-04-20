@@ -25,6 +25,7 @@ Base = declarative_base()
 from app.models.price import Price
 from app.models.rs_daily import RSDaily
 from app.models.official_filings import CompanyOfficialFiling
+from app.models.economic_indicators import EconomicIndicator
 
 def create_tables():
     """إنشاء الجداول"""
