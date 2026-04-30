@@ -13,12 +13,12 @@ def update_todays_market_breadth(db, target_date: date):
         logger.info(f"📊 Aggregating Market Breadth for {target_date}...")
         
         query = text("""
-            INSERT INTO market_breadth (date, pct_above_20, pct_above_50, pct_above_100, pct_above_200)
+            INSERT INTO market_breadth (date, pct_above_20, pct_above_50, pct_above_150, pct_above_200)
             SELECT 
                 :target_date,
                 ROUND(SUM(CASE WHEN close > sma_20 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(id), 0) * 100, 2),
                 ROUND(SUM(CASE WHEN close > sma_50 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(id), 0) * 100, 2),
-                ROUND(SUM(CASE WHEN close > sma_100 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(id), 0) * 100, 2),
+                ROUND(SUM(CASE WHEN close > sma_150 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(id), 0) * 100, 2),
                 ROUND(SUM(CASE WHEN close > sma_200 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(id), 0) * 100, 2)
             FROM stock_indicators
             WHERE date = :target_date
@@ -27,7 +27,7 @@ def update_todays_market_breadth(db, target_date: date):
             ON CONFLICT (date) DO UPDATE SET
                 pct_above_20 = EXCLUDED.pct_above_20,
                 pct_above_50 = EXCLUDED.pct_above_50,
-                pct_above_100 = EXCLUDED.pct_above_100,
+                pct_above_150 = EXCLUDED.pct_above_150,
                 pct_above_200 = EXCLUDED.pct_above_200;
         """)
         

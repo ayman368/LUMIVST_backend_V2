@@ -80,8 +80,8 @@ def fetch_fred_series(series_id: str, observation_start: str = None, max_retries
     return []
 
 
-def scrape_treasury_yield_curve():
-    logger.info("Fetching US Treasury Yield Curve from FRED API...")
+def scrape_treasury_yield_curve(mode: str = "incremental"):
+    logger.info(f"Fetching US Treasury Yield Curve from FRED API (mode={mode})...")
 
     if FRED_API_KEY == "YOUR_API_KEY_HERE":
         logger.error("❌ FRED_API_KEY not set!")
@@ -89,18 +89,22 @@ def scrape_treasury_yield_curve():
 
     db = SessionLocal()
     try:
-        # ✅ Incremental: find the latest date already in DB
-        from sqlalchemy import func
-        latest_row = db.query(func.max(TreasuryYieldCurve.report_date)).scalar()
-        
-        if latest_row:
-            # Fetch only from the day after the latest existing date
-            from datetime import timedelta
-            start_date = (latest_row + timedelta(days=1)).strftime("%Y-%m-%d")
-            logger.info(f"   📅 Latest in DB: {latest_row}. Fetching from {start_date} onwards...")
+        if mode == "full":
+            start_date = None  # Fetch everything from the beginning
+            logger.info("   📅 وضع full: سحب كل البيانات التاريخية...")
         else:
-            start_date = None  # First run — fetch everything
-            logger.info("   📅 First run — fetching all historical data...")
+            # ✅ Incremental: find the latest date already in DB
+            from sqlalchemy import func
+            latest_row = db.query(func.max(TreasuryYieldCurve.report_date)).scalar()
+            
+            if latest_row:
+                # Fetch only from the day after the latest existing date
+                from datetime import timedelta
+                start_date = (latest_row + timedelta(days=1)).strftime("%Y-%m-%d")
+                logger.info(f"   📅 Latest in DB: {latest_row}. Fetching from {start_date} onwards...")
+            else:
+                start_date = None  # First run — fetch everything
+                logger.info("   📅 First run — fetching all historical data...")
 
         data_dict = {}
 
@@ -170,5 +174,10 @@ def scrape_treasury_yield_curve():
 
 
 if __name__ == "__main__":
+    import argparse
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    scrape_treasury_yield_curve()
+    parser = argparse.ArgumentParser(description="Treasury Yield Curve Scraper (FRED API)")
+    parser.add_argument("--mode", default="incremental", choices=["incremental", "full"],
+                        help="incremental: من آخر تاريخ في الـ DB | full: كل التاريخ")
+    args = parser.parse_args()
+    scrape_treasury_yield_curve(mode=args.mode)

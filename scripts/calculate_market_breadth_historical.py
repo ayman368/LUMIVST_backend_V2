@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.config import settings
 
 def main():
-    print("🚀 Starting Historical Market Breadth Calculation (20, 50, 100, 200 MA)")
+    print("🚀 Starting Historical Market Breadth Calculation (20, 50, 150, 200 MA)")
     start_time = time.time()
     
     engine = create_engine(str(settings.DATABASE_URL))
@@ -28,9 +28,9 @@ def main():
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values(by=['symbol', 'date'])
     
-    print("🧮 Calculating Moving Averages (20, 50, 100, 200) for all stocks...")
+    print("🧮 Calculating Moving Averages (20, 50, 150, 200) for all stocks...")
     # حساب المتوسطات المتحركة
-    for ma in [20, 50, 100, 200]:
+    for ma in [20, 50, 150, 200]:
         df[f'sma_{ma}'] = df.groupby('symbol')['close'].transform(lambda x: x.rolling(ma).mean())
         
         # إنشاء أعمدة منطقية (هل السعر أعلى من المتوسط؟)
@@ -48,20 +48,20 @@ def main():
         above_50=('above_50', 'sum'),
         has_sma_50=('has_sma_50', 'sum'),
         
-        above_100=('above_100', 'sum'),
-        has_sma_100=('has_sma_100', 'sum'),
+        above_150=('above_150', 'sum'),
+        has_sma_150=('has_sma_150', 'sum'),
         
         above_200=('above_200', 'sum'),
         has_sma_200=('has_sma_200', 'sum'),
     ).reset_index()
     
     # حساب النسب المئوية مع تجنب القسمة على صفر
-    for ma in [20, 50, 100, 200]:
+    for ma in [20, 50, 150, 200]:
         col_name = f'pct_above_{ma}'
         grouped[col_name] = (grouped[f'above_{ma}'] / grouped[f'has_sma_{ma}'] * 100).fillna(0).round(2)
         
     # تصفية الأعمدة النهائية للجدول
-    final_df = grouped[['date', 'pct_above_20', 'pct_above_50', 'pct_above_100', 'pct_above_200']]
+    final_df = grouped[['date', 'pct_above_20', 'pct_above_50', 'pct_above_150', 'pct_above_200']]
     
     # نتجاهل الأيام التي لم يكن فيها بيانات كافية للحساب
     # (مثلا أول 20 يوم في السوق لن يكون فيها sma_20)
@@ -77,7 +77,7 @@ def main():
                 date DATE PRIMARY KEY,
                 pct_above_20 NUMERIC(5, 2),
                 pct_above_50 NUMERIC(5, 2),
-                pct_above_100 NUMERIC(5, 2),
+                pct_above_150 NUMERIC(5, 2),
                 pct_above_200 NUMERIC(5, 2)
             );
         """))

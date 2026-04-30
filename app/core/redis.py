@@ -15,10 +15,10 @@ class RedisCache:
             self.redis_client = redis.from_url(
                 settings.REDIS_URL,
                 decode_responses=True,
-                socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_connect_timeout=5,
+                socket_timeout=5,
                 socket_keepalive=True,
-                retry_on_timeout=False,
+                retry_on_timeout=True,
                 max_connections=50
             )
 
@@ -41,10 +41,12 @@ class RedisCache:
         if not await self.ensure_connection():
             return False
         try:
-            if isinstance(value, (dict, list)):
-                serialized_value = json.dumps(value, ensure_ascii=False, default=str)
-            else:
-                serialized_value = str(value)
+            # Use FastAPI's jsonable_encoder to safely convert any object (Pydantic models, Lists, Datetime) to serializable dicts/lists
+            from fastapi.encoders import jsonable_encoder
+            serializable = jsonable_encoder(value)
+            
+            # Now dump to JSON safely without fallback str corrupting the data
+            serialized_value = json.dumps(serializable, ensure_ascii=False)
             result = await self.redis_client.set(key, serialized_value, ex=expire)
             return result
         except Exception as e:

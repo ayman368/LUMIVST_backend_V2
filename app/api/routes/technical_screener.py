@@ -3,14 +3,22 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 from typing import List, Optional, Dict, Any
 from datetime import date
+import logging
 
 from app.core.database import get_db
 from app.models.stock_indicators import StockIndicator
+from app.core.cache_helpers import (
+    cache_read_through,
+    make_technical_screener_key
+)
+from app.core.cache_config import CACHE_TTL_SCREENERS
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 @router.get("/technical-screener/screener")
-def get_technical_screener_data(
+async def get_technical_screener_data(
     db: Session = Depends(get_db),
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
@@ -23,53 +31,60 @@ def get_technical_screener_data(
     """
     Returns technical screener rows from stock_indicators only.
     All PineScript-exact values (EMA, SMA, CCI, Aroon, RSI, etc.) come from this single table.
+    Cached with 10-minute TTL.
     """
-    query = db.query(StockIndicator)
+    cache_key = make_technical_screener_key(target_date, latest_only, symbol, min_score, passing_only, limit, offset)
+    
+    async def fetch_screener():
+        query = db.query(StockIndicator)
 
-    # Determine target date
-    result_date = None
-    if target_date:
-        query = query.filter(StockIndicator.date == target_date)
-        result_date = target_date
-    elif latest_only:
-        # Get latest ready date from the global update_status table to ensure consistency
-        from app.models.update_status import UpdateStatus
-        from sqlalchemy import text as sa_text
-        status_row = db.execute(sa_text("SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1")).fetchone()
-        
-        if status_row and status_row[0]:
-            # Always use latest_ready_date (points to last COMPLETE day)
-            latest = status_row[0]
-        elif status_row and status_row[1]:
-            # is_updating=TRUE but no latest_ready_date → system just initialised
-            return {"data": [], "total": 0, "date": None}
-        else:
-            # Fallback only if update_status row doesn't exist at all
-            latest = db.query(func.max(StockIndicator.date)).scalar()
+        # Determine target date
+        result_date = None
+        if target_date:
+            query = query.filter(StockIndicator.date == target_date)
+            result_date = target_date
+        elif latest_only:
+            # Get latest ready date from the global update_status table to ensure consistency
+            from app.models.update_status import UpdateStatus
+            from sqlalchemy import text as sa_text
+            status_row = db.execute(sa_text("SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1")).fetchone()
             
-        if latest:
-            query = query.filter(StockIndicator.date == latest)
-            result_date = str(latest)
+            if status_row and status_row[0]:
+                # Always use latest_ready_date (points to last COMPLETE day)
+                latest = status_row[0]
+            elif status_row and status_row[1]:
+                # is_updating=TRUE but no latest_ready_date → system just initialised
+                return {"data": [], "total": 0, "date": None}
+            else:
+                # Fallback only if update_status row doesn't exist at all
+                latest = db.query(func.max(StockIndicator.date)).scalar()
+                
+            if latest:
+                query = query.filter(StockIndicator.date == latest)
+                result_date = str(latest)
 
-    if symbol:
-        query = query.filter(StockIndicator.symbol == symbol)
+        if symbol:
+            query = query.filter(StockIndicator.symbol == symbol)
 
-    if min_score is not None:
-        query = query.filter(StockIndicator.score >= min_score)
+        if min_score is not None:
+            query = query.filter(StockIndicator.score >= min_score)
 
-    if passing_only:
-        query = query.filter(StockIndicator.final_signal == True)
+        if passing_only:
+            query = query.filter(StockIndicator.final_signal == True)
 
-    query = query.order_by(StockIndicator.symbol)
+        query = query.order_by(StockIndicator.symbol)
 
-    total = query.count()
-    results = query.offset(offset).limit(limit).all()
+        total = query.count()
+        results = query.offset(offset).limit(limit).all()
 
-    return {
-        'data': [indicator_to_dict(ind) for ind in results],
-        'total': total,
-        'date': result_date
-    }
+        return {
+            'data': [indicator_to_dict(ind) for ind in results],
+            'total': total,
+            'date': result_date
+        }
+    
+    result = await cache_read_through(cache_key, CACHE_TTL_SCREENERS, fetch_screener)
+    return result
 
 def indicator_to_dict(ind: StockIndicator) -> dict:
     """تحويل المؤشرات من stock_indicators - المصدر الوحيد للقيم الدقيقة (PineScript)"""

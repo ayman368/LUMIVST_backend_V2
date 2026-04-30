@@ -51,12 +51,13 @@ class SP500History(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class SofrFutures(Base):
-    """Daily snapshot of SOFR futures contracts from Barchart."""
-    __tablename__ = "sofr_futures"
+class EurodollarFutures(Base):
+    """Daily snapshot of Eurodollar futures contracts from Investing.com."""
+    __tablename__ = "eurodollar_futures"
     id           = Column(Integer, primary_key=True, index=True)
     scrape_date  = Column(Date, nullable=False, index=True)        # The day we scraped
-    contract     = Column(String(50), nullable=False, index=True)  # e.g. SRJ26 (Apr '26)
+    symbol       = Column(String(50), nullable=True, index=True)   # e.g. GEM26
+    contract     = Column(String(50), nullable=False, index=True)  # e.g. Jun 26
     last_price   = Column(Numeric(precision=10, scale=4), nullable=True)
     change       = Column(Numeric(precision=10, scale=4), nullable=True)
     open_price   = Column(Numeric(precision=10, scale=4), nullable=True)

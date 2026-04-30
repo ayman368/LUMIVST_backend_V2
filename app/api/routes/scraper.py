@@ -113,6 +113,23 @@ async def ingest_scraped_data(
         ]
         for key in cache_keys:
             await redis_cache.delete(key)
+            
+        from app.core.cache_helpers import (
+            invalidate_prices_latest,
+            invalidate_prices_history,
+            invalidate_rs_data,
+            invalidate_rs_v2_data,
+            invalidate_screener_data,
+            invalidate_technical_screener_data,
+            invalidate_industry_groups_data
+        )
+        await invalidate_prices_latest()
+        await invalidate_prices_history()
+        await invalidate_rs_data()
+        await invalidate_rs_v2_data()
+        await invalidate_screener_data()
+        await invalidate_technical_screener_data()
+        await invalidate_industry_groups_data()
         
         print(f"✅ Ingested {len(request.reports)} reports for {request.company_symbol} (Created: {created_count}, Updated: {updated_count})")
         

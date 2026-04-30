@@ -77,23 +77,27 @@ def fetch_sp500_yahoo(start_date: str = "1990-01-01", max_retries: int = 3):
             logger.error(f"   ❌ Failed to parse Yahoo Finance response: {e}")
             return []
 
-def scrape_sp500():
-    logger.info("Fetching S&P 500 history from Yahoo Finance...")
+def scrape_sp500(mode: str = "incremental"):
+    logger.info(f"Fetching S&P 500 history from Yahoo Finance (mode={mode})...")
 
     db = SessionLocal()
     try:
-        # ✅ Incremental: find the latest date already in DB
-        from sqlalchemy import func
-        from datetime import timedelta
-        latest_row = db.query(func.max(SP500History.trade_date)).scalar()
-
-        if latest_row:
-            # Fetch from a few days before latest to catch any gaps
-            start_date = (latest_row - timedelta(days=3)).strftime("%Y-%m-%d")
-            logger.info(f"   📅 Latest in DB: {latest_row}. Fetching from {start_date} onwards...")
+        if mode == "full":
+            start_date = "1990-01-01"
+            logger.info("   📅 وضع full: سحب كل البيانات التاريخية من 1990...")
         else:
-            start_date = "1990-01-01"  # First run
-            logger.info("   📅 First run — fetching all historical data from 1990...")
+            # ✅ Incremental: find the latest date already in DB
+            from sqlalchemy import func
+            from datetime import timedelta
+            latest_row = db.query(func.max(SP500History.trade_date)).scalar()
+
+            if latest_row:
+                # Fetch from a few days before latest to catch any gaps
+                start_date = (latest_row - timedelta(days=3)).strftime("%Y-%m-%d")
+                logger.info(f"   📅 Latest in DB: {latest_row}. Fetching from {start_date} onwards...")
+            else:
+                start_date = "1990-01-01"  # First run
+                logger.info("   📅 First run — fetching all historical data from 1990...")
 
         records = fetch_sp500_yahoo(start_date=start_date)
 
@@ -136,8 +140,13 @@ def scrape_sp500():
         db.close()
 
 if __name__ == "__main__":
+    import argparse
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s"
     )
-    scrape_sp500()
+    parser = argparse.ArgumentParser(description="S&P 500 History Scraper")
+    parser.add_argument("--mode", default="incremental", choices=["incremental", "full"],
+                        help="incremental: من آخر تاريخ في الـ DB | full: كل التاريخ من 1990")
+    args = parser.parse_args()
+    scrape_sp500(mode=args.mode)

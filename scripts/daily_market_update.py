@@ -287,7 +287,17 @@ def update_daily(target_date_str=None):
         """), {"market_date": market_date, "now": dt_module.datetime.utcnow()})
         db.commit()
 
-        logger.info("🎉 Daily Update Workflow Completed Successfully! New data is now live.")
+        # 10. Invalidate Caches so new data shows up immediately
+        # -------------------------------------------------------------------
+        try:
+            import asyncio
+            from app.core.cache_helpers import invalidate_all_caches
+            asyncio.run(invalidate_all_caches())
+            logger.info("🧹 Application caches cleared successfully. New data is now live.")
+        except Exception as cache_err:
+            logger.error(f"⚠️ Failed to invalidate caches: {cache_err}")
+
+        logger.info("🎉 Daily Update Workflow Completed Successfully!")
 
     except Exception as e:
         logger.error(f"❌ Critical Error in Daily Update: {e}")

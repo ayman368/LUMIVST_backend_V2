@@ -4,12 +4,21 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
 from typing import List, Optional
 from datetime import date
+import logging
 
 import pandas as pd
 
 from app.core.database import get_db
 from app.models.price import Price
 from app.schemas.price import PriceResponse, LatestPricesResponse
+from app.core.cache_helpers import (
+    cache_read_through,
+    make_prices_history_key,
+    make_prices_latest_key
+)
+from app.core.cache_config import CACHE_TTL_PRICES_HISTORY, CACHE_TTL_PRICES_LATEST
+
+logger = logging.getLogger(__name__)
 
 
 class StaticStockInfoImportRequest(BaseModel):
@@ -36,135 +45,141 @@ async def get_price_history(
     Get historical OHLCV + all oscillator data for a symbol.
     prices table: pure OHLCV
     stock_indicators: everything else (RSI, MCAs, SMA, 52w, etc.)
+    Cached with 60-minute TTL.
     """
-    try:
-        from app.models.stock_indicators import StockIndicator
+    cache_key = make_prices_history_key(symbol, limit)
+    
+    async def fetch_history():
+        try:
+            from app.models.stock_indicators import StockIndicator
 
-        results = (
-            db.query(Price, StockIndicator)
-            .outerjoin(
-                StockIndicator,
-                (Price.symbol == StockIndicator.symbol) & (Price.date == StockIndicator.date)
+            results = (
+                db.query(Price, StockIndicator)
+                .outerjoin(
+                    StockIndicator,
+                    (Price.symbol == StockIndicator.symbol) & (Price.date == StockIndicator.date)
+                )
+                .filter(Price.symbol == symbol)
+                .order_by(asc(Price.date))  # ترتيب تصاعدي من الأقدم للأحدث
+                .limit(limit)
+                .all()
             )
-            .filter(Price.symbol == symbol)
-            .order_by(asc(Price.date))  # ترتيب تصاعدي من الأقدم للأحدث
-            .limit(limit)
-            .all()
-        )
 
-        if not results:
-            raise HTTPException(status_code=404, detail=f"No price history found for symbol {symbol}")
+            if not results:
+                raise HTTPException(status_code=404, detail=f"No price history found for symbol {symbol}")
 
-        def f(val):
-            return float(val) if val is not None else None
+            def f(val):
+                return float(val) if val is not None else None
 
-        data = []
-        for price, ind in results:
-            data.append({
-                "time":   price.date.isoformat(),
-                "open":   f(price.open),
-                "high":   f(price.high),
-                "low":    f(price.low),
-                "close":  f(price.close),
-                "volume": int(price.volume_traded) if price.volume_traded is not None else 0,
-                # ── Standard SMAs (from stock_indicators) ──────────────────
-                "sma_10":  f(ind.sma_10)  if ind else None,
-                "sma_21":  f(ind.sma_21)  if ind else None,
-                "sma_50":  f(ind.sma_50)  if ind else None,
-                "sma_150": f(ind.sma_150) if ind else None,
-                "sma_200": f(ind.sma_200) if ind else None,
-                # ── PineScript-exact EMAs (from stock_indicators) ───────────
-                "ema_10":  f(ind.ema10) if ind else None,
-                "ema_21":  f(ind.ema21) if ind else None,
-                # ── Historical 200MA (from stock_indicators) ───────────────
-                "sma_200_1m_ago": f(ind.sma_200_1m_ago) if ind else None,
-                "sma_200_2m_ago": f(ind.sma_200_2m_ago) if ind else None,
-                "sma_200_3m_ago": f(ind.sma_200_3m_ago) if ind else None,
-                "sma_200_4m_ago": f(ind.sma_200_4m_ago) if ind else None,
-                "sma_200_5m_ago": f(ind.sma_200_5m_ago) if ind else None,
-                # ── Weekly SMAs (from stock_indicators) ────────────────────
-                "sma_30w": f(ind.sma_30w) if ind else None,
-                "sma_40w": f(ind.sma_40w) if ind else None,
-                # ── Additional SMAs (from stock_indicators) ────────────────
-                "sma_3": f(ind.sma3_rsi3) if ind else None,
-                "ema_20_sma3": f(ind.ema20_sma3) if ind else None,
-                # ── Price vs SMA % (from stock_indicators) ──────────────────
-                "price_vs_sma_10_percent": f(ind.price_vs_sma_10_percent) if ind else None,
-                "price_vs_sma_21_percent": f(ind.price_vs_sma_21_percent) if ind else None,
-                "price_vs_sma_50_percent": f(ind.price_vs_sma_50_percent) if ind else None,
-                "price_vs_sma_150_percent": f(ind.price_vs_sma_150_percent) if ind else None,
-                "price_vs_sma_200_percent": f(ind.price_vs_sma_200_percent) if ind else None,
-                # ── 52-Week & Volume Stats ──────────────────────────────────
-                "fifty_two_week_high": f(ind.fifty_two_week_high) if ind else None,
-                "fifty_two_week_low":  f(ind.fifty_two_week_low)  if ind else None,
-                "average_volume_50":   f(ind.average_volume_50)   if ind else None,
-                "vol_diff_50_percent": f(ind.vol_diff_50_percent) if ind else None,
-                "percent_off_52w_high": f(ind.percent_off_52w_high) if ind else None,
-                "percent_off_52w_low":  f(ind.percent_off_52w_low)  if ind else None,
-                # ── RSI Daily ──────────────────────────────────────────────
-                "rsi_14":    f(ind.rsi_14)    if ind else None,
-                "sma9_rsi":  f(ind.sma9_rsi)  if ind else None,
-                "wma45_rsi": f(ind.wma45_rsi) if ind else None,
-                # ── RSI Weekly ─────────────────────────────────────────────
-                "rsi_w":       f(ind.rsi_w)       if ind else None,
-                "sma9_rsi_w":  f(ind.sma9_rsi_w)  if ind else None,
-                "wma45_rsi_w": f(ind.wma45_rsi_w) if ind else None,
-                # ── CCI Daily ──────────────────────────────────────────────
-                "cci":       f(ind.cci)       if ind else None,
-                "cci_ema20": f(ind.cci_ema20) if ind else None,
-                # ── CCI Weekly ─────────────────────────────────────────────
-                "cci_w":       f(ind.cci_w)       if ind else None,
-                "cci_ema20_w": f(ind.cci_ema20_w) if ind else None,
-                # ── CFG Daily ──────────────────────────────────────────────
-                "cfg":       f(ind.cfg_daily) if ind else None,
-                "cfg_sma4":  f(ind.cfg_sma4)  if ind else None,
-                "cfg_ema45": f(ind.cfg_ema45) if ind else None,
-                # ── CFG Weekly ─────────────────────────────────────────────
-                "cfg_w":       f(ind.cfg_w)       if ind else None,
-                "cfg_sma4_w":  f(ind.cfg_sma4_w)  if ind else None,
-                "cfg_ema45_w": f(ind.cfg_ema45_w) if ind else None,
-                # ── THE.NUMBER Daily ───────────────────────────────────────
-                "the_number":    f(ind.the_number)    if ind else None,
-                "the_number_hl": f(ind.the_number_hl) if ind else None,
-                "the_number_ll": f(ind.the_number_ll) if ind else None,
-                # ── THE.NUMBER Weekly ──────────────────────────────────────
-                "the_number_w":    f(ind.the_number_w)    if ind else None,
-                "the_number_hl_w": f(ind.the_number_hl_w) if ind else None,
-                "the_number_ll_w": f(ind.the_number_ll_w) if ind else None,
-                # ── STAMP Daily ────────────────────────────────────────────
-                "stamp_s9rsi":   f(ind.stamp_s9rsi)   if ind else None,
-                "stamp_e45cfg":  f(ind.stamp_e45cfg)  if ind else None,
-                "stamp_e45rsi":  f(ind.stamp_e45rsi)  if ind else None,
-                "stamp_e20sma3": f(ind.stamp_e20sma3) if ind else None,
-                # ── STAMP Weekly ───────────────────────────────────────────
-                "stamp_s9rsi_w":  f(ind.stamp_s9rsi_w)  if ind else None,
-                "stamp_e45cfg_w": f(ind.stamp_e45cfg_w) if ind else None,
-                "stamp_e45rsi_w": f(ind.stamp_e45rsi_w) if ind else None,
-                "stamp_e20sma3_w": f(ind.stamp_e20sma3_w) if ind else None,
-                # ── Price MAs from indicators ──────────────────────────────
-                "sma4":  f(ind.sma4)  if ind else None,
-                "sma9":  f(ind.sma9_close) if ind else None,
-                "sma18": f(ind.sma18) if ind else None,
-                "wma45_close": f(ind.wma45_close) if ind else None,
-                # ── Weekly price MAs ─────────────────────────────────────
-                "sma4_w":  f(ind.sma4_w)  if ind else None,
-                "sma9_w":  f(ind.sma9_w)  if ind else None,
-                "sma18_w": f(ind.sma18_w) if ind else None,
-                "wma45_close_w": f(ind.wma45_close_w) if ind else None,
-                # ── Aroon ─────────────────────────────────────────────────
-                "aroon_up":   f(ind.aroon_up)   if ind else None,
-                "aroon_down": f(ind.aroon_down) if ind else None,
-                "aroon_up_w":   f(ind.aroon_up_w)   if ind else None,
-                "aroon_down_w": f(ind.aroon_down_w) if ind else None,
-            })
+            data = []
+            for price, ind in results:
+                data.append({
+                    "time":   price.date.isoformat(),
+                    "open":   f(price.open),
+                    "high":   f(price.high),
+                    "low":    f(price.low),
+                    "close":  f(price.close),
+                    "volume": int(price.volume_traded) if price.volume_traded is not None else 0,
+                    # ── Standard SMAs (from stock_indicators) ──────────────────
+                    "sma_10":  f(ind.sma_10)  if ind else None,
+                    "sma_21":  f(ind.sma_21)  if ind else None,
+                    "sma_50":  f(ind.sma_50)  if ind else None,
+                    "sma_150": f(ind.sma_150) if ind else None,
+                    "sma_200": f(ind.sma_200) if ind else None,
+                    # ── PineScript-exact EMAs (from stock_indicators) ───────────
+                    "ema_10":  f(ind.ema10) if ind else None,
+                    "ema_21":  f(ind.ema21) if ind else None,
+                    # ── Historical 200MA (from stock_indicators) ───────────────
+                    "sma_200_1m_ago": f(ind.sma_200_1m_ago) if ind else None,
+                    "sma_200_2m_ago": f(ind.sma_200_2m_ago) if ind else None,
+                    "sma_200_3m_ago": f(ind.sma_200_3m_ago) if ind else None,
+                    "sma_200_4m_ago": f(ind.sma_200_4m_ago) if ind else None,
+                    "sma_200_5m_ago": f(ind.sma_200_5m_ago) if ind else None,
+                    # ── Weekly SMAs (from stock_indicators) ────────────────────
+                    "sma_30w": f(ind.sma_30w) if ind else None,
+                    "sma_40w": f(ind.sma_40w) if ind else None,
+                    # ── Additional SMAs (from stock_indicators) ────────────────
+                    "sma_3": f(ind.sma3_rsi3) if ind else None,
+                    "ema_20_sma3": f(ind.ema20_sma3) if ind else None,
+                    # ── Price vs SMA % (from stock_indicators) ──────────────────
+                    "price_vs_sma_10_percent": f(ind.price_vs_sma_10_percent) if ind else None,
+                    "price_vs_sma_21_percent": f(ind.price_vs_sma_21_percent) if ind else None,
+                    "price_vs_sma_50_percent": f(ind.price_vs_sma_50_percent) if ind else None,
+                    "price_vs_sma_150_percent": f(ind.price_vs_sma_150_percent) if ind else None,
+                    "price_vs_sma_200_percent": f(ind.price_vs_sma_200_percent) if ind else None,
+                    # ── 52-Week & Volume Stats ──────────────────────────────────
+                    "fifty_two_week_high": f(ind.fifty_two_week_high) if ind else None,
+                    "fifty_two_week_low":  f(ind.fifty_two_week_low)  if ind else None,
+                    "average_volume_50":   f(ind.average_volume_50)   if ind else None,
+                    "vol_diff_50_percent": f(ind.vol_diff_50_percent) if ind else None,
+                    "percent_off_52w_high": f(ind.percent_off_52w_high) if ind else None,
+                    "percent_off_52w_low":  f(ind.percent_off_52w_low)  if ind else None,
+                    # ── RSI Daily ──────────────────────────────────────────────
+                    "rsi_14":    f(ind.rsi_14)    if ind else None,
+                    "sma9_rsi":  f(ind.sma9_rsi)  if ind else None,
+                    "wma45_rsi": f(ind.wma45_rsi) if ind else None,
+                    # ── RSI Weekly ─────────────────────────────────────────────
+                    "rsi_w":       f(ind.rsi_w)       if ind else None,
+                    "sma9_rsi_w":  f(ind.sma9_rsi_w)  if ind else None,
+                    "wma45_rsi_w": f(ind.wma45_rsi_w) if ind else None,
+                    # ── CCI Daily ──────────────────────────────────────────────
+                    "cci":       f(ind.cci)       if ind else None,
+                    "cci_ema20": f(ind.cci_ema20) if ind else None,
+                    # ── CCI Weekly ─────────────────────────────────────────────
+                    "cci_w":       f(ind.cci_w)       if ind else None,
+                    "cci_ema20_w": f(ind.cci_ema20_w) if ind else None,
+                    # ── CFG Daily ──────────────────────────────────────────────
+                    "cfg":       f(ind.cfg_daily) if ind else None,
+                    "cfg_sma4":  f(ind.cfg_sma4)  if ind else None,
+                    "cfg_ema45": f(ind.cfg_ema45) if ind else None,
+                    # ── CFG Weekly ─────────────────────────────────────────────
+                    "cfg_w":       f(ind.cfg_w)       if ind else None,
+                    "cfg_sma4_w":  f(ind.cfg_sma4_w)  if ind else None,
+                    "cfg_ema45_w": f(ind.cfg_ema45_w) if ind else None,
+                    # ── THE.NUMBER Daily ───────────────────────────────────────
+                    "the_number":    f(ind.the_number)    if ind else None,
+                    "the_number_hl": f(ind.the_number_hl) if ind else None,
+                    "the_number_ll": f(ind.the_number_ll) if ind else None,
+                    # ── THE.NUMBER Weekly ──────────────────────────────────────
+                    "the_number_w":    f(ind.the_number_w)    if ind else None,
+                    "the_number_hl_w": f(ind.the_number_hl_w) if ind else None,
+                    "the_number_ll_w": f(ind.the_number_ll_w) if ind else None,
+                    # ── STAMP Daily ────────────────────────────────────────────
+                    "stamp_s9rsi":   f(ind.stamp_s9rsi)   if ind else None,
+                    "stamp_e45cfg":  f(ind.stamp_e45cfg)  if ind else None,
+                    "stamp_e45rsi":  f(ind.stamp_e45rsi)  if ind else None,
+                    "stamp_e20sma3": f(ind.stamp_e20sma3) if ind else None,
+                    # ── STAMP Weekly ───────────────────────────────────────────
+                    "stamp_s9rsi_w":  f(ind.stamp_s9rsi_w)  if ind else None,
+                    "stamp_e45cfg_w": f(ind.stamp_e45cfg_w) if ind else None,
+                    "stamp_e45rsi_w": f(ind.stamp_e45rsi_w) if ind else None,
+                    "stamp_e20sma3_w": f(ind.stamp_e20sma3_w) if ind else None,
+                    # ── Price MAs from indicators ──────────────────────────────
+                    "sma4":  f(ind.sma4)  if ind else None,
+                    "sma9":  f(ind.sma9_close) if ind else None,
+                    "sma18": f(ind.sma18) if ind else None,
+                    "wma45_close": f(ind.wma45_close) if ind else None,
+                    # ── Weekly price MAs ─────────────────────────────────────
+                    "sma4_w":  f(ind.sma4_w)  if ind else None,
+                    "sma9_w":  f(ind.sma9_w)  if ind else None,
+                    "sma18_w": f(ind.sma18_w) if ind else None,
+                    "wma45_close_w": f(ind.wma45_close_w) if ind else None,
+                    # ── Aroon ─────────────────────────────────────────────────
+                    "aroon_up":   f(ind.aroon_up)   if ind else None,
+                    "aroon_down": f(ind.aroon_down) if ind else None,
+                    "aroon_up_w":   f(ind.aroon_up_w)   if ind else None,
+                    "aroon_down_w": f(ind.aroon_down_w) if ind else None,
+                })
 
-        return {"symbol": symbol, "count": len(data), "data": data}
+            return {"symbol": symbol, "count": len(data), "data": data}
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching price history for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Error fetching price history for {symbol}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return await cache_read_through(cache_key, CACHE_TTL_PRICES_HISTORY, fetch_history)
 
 
 @router.post("/static-info/import")
@@ -226,6 +241,18 @@ async def import_static_stock_info(request: StaticStockInfoImportRequest, db: Se
             
         db.commit()
 
+        # Invalidate related caches
+        from app.core.cache_helpers import (
+            invalidate_industry_groups_data, 
+            invalidate_prices_latest, 
+            invalidate_screener_data, 
+            invalidate_technical_screener_data
+        )
+        await invalidate_industry_groups_data()
+        await invalidate_prices_latest()
+        await invalidate_screener_data()
+        await invalidate_technical_screener_data()
+
         return {
             "success": True,
             "updated_rows": updated,
@@ -246,77 +273,78 @@ async def get_latest_prices(
     """
     Get the latest prices for all stocks.
     Finds the most recent date in the prices table and returns all records for that date.
+    Cached with 5-minute TTL.
     """
-    try:
-        # 1. Get the atomic latest_ready_date from update_status
-        from sqlalchemy import text as sa_text
-        status_row = db.execute(sa_text("SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1")).fetchone()
-        
-        if status_row and status_row[0]:
-            # Always use latest_ready_date (points to last COMPLETE day)
-            latest_date = status_row[0]
-        elif status_row and status_row[1]:
-            # is_updating=TRUE but no latest_ready_date → system just initialised, serve nothing
-            return LatestPricesResponse(date=date.today(), count=0, data=[])
-        else:
-            # Fallback only if update_status row doesn't exist at all
-            latest_date_row = db.query(Price.date).order_by(desc(Price.date)).first()
-            if not latest_date_row:
-                return LatestPricesResponse(date=date.today(), count=0, data=[])
-            latest_date = latest_date_row[0]
-        
-        # 2. Query data for that date
-        results = db.query(Price).filter(Price.date == latest_date).limit(limit).all()
-
-        # 3. Load TradingView Symbols Mapping
-        tv_mapping = {}
+    cache_key = make_prices_latest_key(limit)
+    
+    async def fetch_latest():
         try:
-            # Assuming company_symbols.csv is in backend/company_symbols.csv
-            # Current file is backend/app/api/routes/prices.py
-            csv_path = Path(__file__).resolve().parent.parent.parent.parent / "company_symbols.csv"
+            # 1. Get the atomic latest_ready_date from update_status
+            from sqlalchemy import text as sa_text
+            status_row = db.execute(sa_text("SELECT latest_ready_date, is_updating FROM update_status WHERE id = 1")).fetchone()
             
-            if csv_path.exists():
-                with open(csv_path, 'r', encoding='utf-8-sig') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        # CSV Header: Symbol,Company,symbol on tradingView
-                        sym = str(row.get('Symbol', '')).strip()
-                        tv_sym = str(row.get('symbol on tradingView', '')).strip()
-                        if sym and tv_sym:
-                            tv_mapping[sym] = tv_sym
-        except Exception as e:
-            print(f"Error loading company_symbols.csv: {e}")
-
-        # 4. Attach TradingView Symbol to results
-        # We need to convert SQLAlchemy objects to Pydantic models to add the field
-        # because the SQLAlchemy model doesn't have this field.
-        # But wait, Pydantic's from_attributes=True might try to read it from the object.
-        # If we just attach it to the object instances, python allows it.
-        
-        # 4. Fetch Static Info and attach it
-        from app.models.static_stock_info import StaticStockInfo
-        static_rows = db.query(StaticStockInfo).all()
-        static_map = {row.symbol: row for row in static_rows}
-        
-        for price in results:
-            price.trading_view_symbol = tv_mapping.get(str(price.symbol))
-            
-            # Attach static info dynamically
-            s_info = static_map.get(str(price.symbol))
-            if s_info:
-                price.approval_with_controls = s_info.approval_with_controls
-                price.purge_amount = s_info.purge_amount
-                price.marginable_percent = s_info.marginable_percent
+            if status_row and status_row[0]:
+                # Always use latest_ready_date (points to last COMPLETE day)
+                latest_date = status_row[0]
+            elif status_row and status_row[1]:
+                # is_updating=TRUE but no latest_ready_date → system just initialised, serve nothing
+                return LatestPricesResponse(date=date.today(), count=0, data=[])
             else:
-                price.approval_with_controls = None
-                price.purge_amount = None
-                price.marginable_percent = None
+                # Fallback only if update_status row doesn't exist at all
+                latest_date_row = db.query(Price.date).order_by(desc(Price.date)).first()
+                if not latest_date_row:
+                    return LatestPricesResponse(date=date.today(), count=0, data=[])
+                latest_date = latest_date_row[0]
+            
+            # 2. Query data for that date
+            results = db.query(Price).filter(Price.date == latest_date).limit(limit).all()
 
-        return LatestPricesResponse(
-            date=latest_date,
-            count=len(results),
-            data=results
-        )
-    except Exception as e:
-        print(f"Error fetching latest prices: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+            # 3. Load TradingView Symbols Mapping
+            tv_mapping = {}
+            try:
+                # Assuming company_symbols.csv is in backend/company_symbols.csv
+                # Current file is backend/app/api/routes/prices.py
+                csv_path = Path(__file__).resolve().parent.parent.parent.parent / "company_symbols.csv"
+                
+                if csv_path.exists():
+                    with open(csv_path, 'r', encoding='utf-8-sig') as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            # CSV Header: Symbol,Company,symbol on tradingView
+                            sym = str(row.get('Symbol', '')).strip()
+                            tv_sym = str(row.get('symbol on tradingView', '')).strip()
+                            if sym and tv_sym:
+                                tv_mapping[sym] = tv_sym
+            except Exception as e:
+                logger.warning(f"Error loading company_symbols.csv: {e}")
+
+            # 4. Fetch Static Info and attach it
+            from app.models.static_stock_info import StaticStockInfo
+            static_rows = db.query(StaticStockInfo).all()
+            static_map = {row.symbol: row for row in static_rows}
+            
+            for price in results:
+                price.trading_view_symbol = tv_mapping.get(str(price.symbol))
+                
+                # Attach static info dynamically
+                s_info = static_map.get(str(price.symbol))
+                if s_info:
+                    price.approval_with_controls = s_info.approval_with_controls
+                    price.purge_amount = s_info.purge_amount
+                    price.marginable_percent = s_info.marginable_percent
+                else:
+                    price.approval_with_controls = None
+                    price.purge_amount = None
+                    price.marginable_percent = None
+
+            return LatestPricesResponse(
+                date=latest_date,
+                count=len(results),
+                data=results
+            )
+        except Exception as e:
+            logger.error(f"Error fetching latest prices: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    result = await cache_read_through(cache_key, CACHE_TTL_PRICES_LATEST, fetch_latest)
+    return result

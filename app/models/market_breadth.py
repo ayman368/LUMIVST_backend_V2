@@ -13,7 +13,7 @@ class MarketBreadth(Base):
     date = Column(Date, primary_key=True, index=True)
     pct_above_20 = Column(Numeric(5, 2), nullable=True)
     pct_above_50 = Column(Numeric(5, 2), nullable=True)
-    pct_above_100 = Column(Numeric(5, 2), nullable=True)
+    pct_above_150 = Column(Numeric(5, 2), nullable=True)
     pct_above_200 = Column(Numeric(5, 2), nullable=True)
     
     __table_args__ = (

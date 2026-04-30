@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import stocks, financials, cache, auth, contact, rs, rs_v2, admin, scraper, official_filings, financial_details, prices, technical_screener, financial_metrics, screeners, market_breadth, market_reports, economic_indicators
+from app.api.routes import stocks, cache, auth, contact, rs, rs_v2, admin, scraper, official_filings, financial_details, prices, technical_screener, financial_metrics, screeners, market_breadth, market_reports, economic_indicators, xbrl_companies, xbrl_financials, xbrl_upload
 
 # ... (Previous code)
 
@@ -124,7 +124,6 @@ protected_dependencies = [Depends(get_current_user)]
 admin_dependencies = [Depends(get_current_admin)]
 
 app.include_router(stocks.router, dependencies=protected_dependencies)
-app.include_router(financials.router, dependencies=protected_dependencies)
 app.include_router(cache.router, dependencies=protected_dependencies)
 
 app.include_router(rs.router, prefix="/api", dependencies=protected_dependencies)  # RS V1 endpoints
@@ -142,6 +141,9 @@ app.include_router(financial_metrics.router, prefix="/api/financial-metrics", ta
 app.include_router(market_breadth.router, prefix="/api")  # /api/market-breadth/*
 app.include_router(market_reports.router, prefix="/api/market-reports", tags=["Market Reports"])
 app.include_router(economic_indicators.router, prefix="/api/economic-indicators", tags=["Economic Indicators"])
+app.include_router(xbrl_companies.router, dependencies=protected_dependencies)
+app.include_router(xbrl_financials.router, dependencies=protected_dependencies)
+app.include_router(xbrl_upload.router, dependencies=protected_dependencies)
 
 # Event handlers
 @app.on_event("startup")
@@ -157,8 +159,16 @@ async def startup_event():
     else:
         print("✅ Redis cache initialized successfully")
     
-    # Scheduler removed in favor of Render Cron Job
-    # The daily update script is now run independently.
+    # ── Start Scheduler (only if ENABLE_SCHEDULER=true) ──
+    from app.core.scheduler import start_scheduler
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    from app.core.scheduler import stop_scheduler
+    stop_scheduler()
+    print("🛑 Saudi Stocks API shutting down...")
 
 @app.get("/")
 async def root():

@@ -3,12 +3,23 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import List, Optional
 from datetime import date
+import logging
 
 from app.core.database import get_db
 from app.models.rs_daily import RSDaily
 from app.schemas.rs import RSResponse, RSLatestResponse
 from app.core.limiter import limiter
 from fastapi import Request
+from app.core.cache_helpers import (
+    cache_read_through,
+    make_rs_latest_key,
+    make_rs_history_key,
+    make_rs_advanced_key,
+    normalize_string
+)
+from app.core.cache_config import CACHE_TTL_SCREENERS, CACHE_TTL_RS_HISTORY
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rs", tags=["Relative Strength"])
 
@@ -22,49 +33,61 @@ async def get_latest_rs(
 ):
     """
     الحصول على آخر RS Rating لكل الأسهم مع التقييم السابق.
+    Cached with 10-minute TTL.
     """
-    try:
-        # 1. معرفة آخر تاريخين متاحين
-        dates_row = db.query(RSDaily.date).distinct().order_by(desc(RSDaily.date)).limit(2).all()
-        
-        if not dates_row:
-            return RSLatestResponse(data=[], total_count=0, date=date.today())
-        
-        latest_date = dates_row[0][0]
-        prev_date = dates_row[1][0] if len(dates_row) > 1 else None
-        
-        # 2. الحصول على التقييمات السابقة (إذا وجدت)
-        prev_ratings = {}
-        if prev_date:
-            prev_results = db.query(RSDaily.symbol, RSDaily.rs_rating).filter(RSDaily.date == prev_date).all()
-            prev_ratings = {r.symbol: r.rs_rating for r in prev_results}
-        
-        # 3. بناء الاستعلام للبيانات الحالية
-        query = db.query(RSDaily).filter(RSDaily.date == latest_date)
-        
-        if min_rs is not None:
-            query = query.filter(RSDaily.rs_rating >= min_rs)
-        
-        # الترتيب حسب RS Rating بشكل افتراضي
-        query = query.order_by(desc(RSDaily.rs_rating))
-        
-        # تنفيذ الاستعلام مع الحد الأقصى
-        results = query.limit(limit).all()
-        
-        # 4. دمج التقييمات السابقة
-        for r in results:
-            r.prev_rs_rating = prev_ratings.get(r.symbol)
-        
-        return RSLatestResponse(
-            data=results,
-            total_count=len(results),
-            date=latest_date
-        )
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"❌ Error in get_latest_rs: {e}")
-        raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}")
+    cache_key = make_rs_latest_key(min_rs, limit)
+    
+    async def fetch_rs_latest():
+        try:
+            # 1. معرفة آخر تاريخين متاحين
+            dates_row = db.query(RSDaily.date).distinct().order_by(desc(RSDaily.date)).limit(2).all()
+            
+            if not dates_row:
+                return RSLatestResponse(data=[], total_count=0, date=date.today())
+            
+            latest_date = dates_row[0][0]
+            prev_date = dates_row[1][0] if len(dates_row) > 1 else None
+            
+            # 2. الحصول على التقييمات السابقة (إذا وجدت)
+            prev_ratings = {}
+            if prev_date:
+                prev_results = db.query(RSDaily.symbol, RSDaily.rs_rating).filter(RSDaily.date == prev_date).all()
+                prev_ratings = {r.symbol: r.rs_rating for r in prev_results}
+            
+            # 3. بناء الاستعلام للبيانات الحالية
+            query = db.query(RSDaily).filter(RSDaily.date == latest_date)
+            
+            if min_rs is not None:
+                query = query.filter(RSDaily.rs_rating >= min_rs)
+            
+            # الترتيب حسب RS Rating بشكل افتراضي
+            query = query.order_by(desc(RSDaily.rs_rating))
+            
+            # تنفيذ الاستعلام مع الحد الأقصى
+            results = query.limit(limit).all()
+            
+            # 4. دمج التقييمات السابقة
+            for r in results:
+                r.prev_rs_rating = prev_ratings.get(r.symbol)
+            
+            return RSLatestResponse(
+                data=results,
+                total_count=len(results),
+                date=latest_date
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            logger.error(f"Error in get_latest_rs: {e}")
+            raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}")
+    
+    # Use cache read-through
+    result = await cache_read_through(
+        cache_key,
+        CACHE_TTL_SCREENERS,
+        fetch_rs_latest
+    )
+    return result
 
 @router.get("/{symbol}", response_model=List[RSResponse])
 @limiter.limit("20/minute")
@@ -77,20 +100,36 @@ async def get_rs_history(
 ):
     """
     الحصول على تاريخ RS لسهم معين.
+    Cached with 30-minute TTL.
     """
-    symbol_str = str(symbol).strip()
+    cache_key = make_rs_history_key(
+        symbol,
+        from_date.isoformat() if from_date else None,
+        to_date.isoformat() if to_date else None
+    )
     
-    query = db.query(RSDaily).filter(RSDaily.symbol == symbol_str)
+    async def fetch_rs_history():
+        symbol_str = str(symbol).strip()
+        
+        query = db.query(RSDaily).filter(RSDaily.symbol == symbol_str)
+        
+        if from_date:
+            query = query.filter(RSDaily.date >= from_date)
+        if to_date:
+            query = query.filter(RSDaily.date <= to_date)
+        
+        # ترتيب حسب التاريخ
+        results = query.order_by(RSDaily.date).all()
+        
+        return results or []
     
-    if from_date:
-        query = query.filter(RSDaily.date >= from_date)
-    if to_date:
-        query = query.filter(RSDaily.date <= to_date)
-    
-    # ترتيب حسب التاريخ
-    results = query.order_by(RSDaily.date).all()
-    
-    return results or []
+    # Use cache read-through
+    result = await cache_read_through(
+        cache_key,
+        CACHE_TTL_RS_HISTORY,
+        fetch_rs_history
+    )
+    return result
 
 @router.get("/screener/advanced", response_model=RSLatestResponse)
 @limiter.limit("10/minute")
@@ -104,38 +143,50 @@ async def advanced_screener(
     db: Session = Depends(get_db)
 ):
     """
-    فلترة متقدمة للأسهم بناءً على الرتب والفترات
+    فلترة متقدمة للأسهم بناءً على الرتب والفترات.
+    Cached with 10-minute TTL.
     """
-    # آخر تاريخ
-    latest_date_row = db.query(RSDaily.date).order_by(desc(RSDaily.date)).first()
-    if not latest_date_row:
-        return RSLatestResponse(data=[], total_count=0, date=date.today())
+    cache_key = make_rs_advanced_key(min_rs, min_rank_3m, min_rank_6m, sort_by, limit)
     
-    latest_date = latest_date_row[0]
-    
-    query = db.query(RSDaily).filter(RSDaily.date == latest_date)
-    
-    # تطبيق الفلاتر
-    if min_rs > 0:
-        query = query.filter(RSDaily.rs_rating >= min_rs)
-    
-    if min_rank_3m is not None:
-        query = query.filter(RSDaily.rank_3m >= min_rank_3m)
+    async def fetch_advanced():
+        # آخر تاريخ
+        latest_date_row = db.query(RSDaily.date).order_by(desc(RSDaily.date)).first()
+        if not latest_date_row:
+            return RSLatestResponse(data=[], total_count=0, date=date.today())
         
-    if min_rank_6m is not None:
-        query = query.filter(RSDaily.rank_6m >= min_rank_6m)
-    
-    # الترتيب
-    if hasattr(RSDaily, sort_by):
-        col = getattr(RSDaily, sort_by)
-        query = query.order_by(desc(col))
-    else:
-        query = query.order_by(desc(RSDaily.rs_rating))
+        latest_date = latest_date_row[0]
         
-    results = query.limit(limit).all()
+        query = db.query(RSDaily).filter(RSDaily.date == latest_date)
+        
+        # تطبيق الفلاتر
+        if min_rs > 0:
+            query = query.filter(RSDaily.rs_rating >= min_rs)
+        
+        if min_rank_3m is not None:
+            query = query.filter(RSDaily.rank_3m >= min_rank_3m)
+            
+        if min_rank_6m is not None:
+            query = query.filter(RSDaily.rank_6m >= min_rank_6m)
+        
+        # الترتيب
+        if hasattr(RSDaily, sort_by):
+            col = getattr(RSDaily, sort_by)
+            query = query.order_by(desc(col))
+        else:
+            query = query.order_by(desc(RSDaily.rs_rating))
+            
+        results = query.limit(limit).all()
+        
+        return RSLatestResponse(
+            data=results,
+            total_count=len(results),
+            date=latest_date
+        )
     
-    return RSLatestResponse(
-        data=results,
-        total_count=len(results),
-        date=latest_date
+    # Use cache read-through
+    result = await cache_read_through(
+        cache_key,
+        CACHE_TTL_SCREENERS,
+        fetch_advanced
     )
+    return result

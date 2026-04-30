@@ -39,10 +39,9 @@
 # ]
 # backend/app/api/endpoints/__init__.py
 
-from . import financials
 from . import stocks
 
-__all__ = ["financials", "stocks"]
+__all__ = [ "stocks"]
 
 # from . import auth, admin, cache, financials, profile, queue, statistics, stocks
 

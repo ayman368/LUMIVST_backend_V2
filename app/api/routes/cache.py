@@ -10,7 +10,6 @@ async def clear_all_cache():
     """مسح كل الكاش"""
     try:
         await redis_cache.flush_all()
-        await stock_cache.clear_all_cache()
         return {"message": "✅ تم مسح كل الكاش بنجاح"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطأ في مسح الكاش: {str(e)}")
@@ -19,8 +18,12 @@ async def clear_all_cache():
 async def clear_stocks_cache():
     """مسح كاش الأسهم"""
     try:
-        await stock_cache.clear_all_cache()
-        return {"message": "✅ تم مسح كاش الأسهم بنجاح"}
+        # مسح كل مفاتيح الأسهم من Redis
+        keys = await redis_cache.keys("tadawul_stocks:*")
+        deleted = 0
+        for key in keys:
+            deleted += await redis_cache.delete(key)
+        return {"message": f"✅ تم مسح كاش الأسهم بنجاح ({deleted} مفتاح)"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطأ في مسح كاش الأسهم: {str(e)}")
 
@@ -30,23 +33,32 @@ async def clear_financial_cache(
 ):
     """مسح كاش البيانات المالية لرمز أو رموز محددة"""
     try:
-        result = await financial_cache.clear_financial_cache(symbol)
-        
         if symbol:
-            if ',' in symbol:
-                symbol_list = [s.strip() for s in symbol.split(',')]
-                message = f"✅ تم مسح كاش البيانات المالية لـ {len(symbol_list)} رمز"
+            # مسح كاش رموز محددة
+            symbols = [s.strip() for s in symbol.split(',')]
+            deleted = 0
+            for sym in symbols:
+                pattern = f"financials:*:{sym}:*"
+                keys = await redis_cache.keys(pattern)
+                for key in keys:
+                    deleted += await redis_cache.delete(key)
+            
+            if len(symbols) > 1:
+                message = f"✅ تم مسح كاش البيانات المالية لـ {len(symbols)} رمز"
             else:
                 message = f"✅ تم مسح كاش البيانات المالية لـ {symbol}"
         else:
+            # مسح كل كاش البيانات المالية
+            keys = await redis_cache.keys("financials:*")
+            deleted = 0
+            for key in keys:
+                deleted += await redis_cache.delete(key)
             message = "✅ تم مسح كاش البيانات المالية بالكامل"
             
-        return {"message": message, "deleted_count": result}
+        return {"message": message, "deleted_count": deleted}
     except Exception as e:
         print(f"❌ خطأ في مسح كاش البيانات المالية: {e}")
-        # إرجاع رسالة خطأ أكثر وضوحاً
-        error_detail = f"خطأ في مسح كاش البيانات المالية: {str(e)}"
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise HTTPException(status_code=500, detail=f"خطأ في مسح كاش البيانات المالية: {str(e)}")
 
 @router.get("/status")
 async def cache_status():
@@ -73,9 +85,8 @@ async def cache_status():
 @router.delete("/clear/symbols")
 async def clear_specific_symbols_cache(
     symbols: str = Query(..., description="رموز الأسهم مفصولة بفواصل"),
-    clear_db: bool = Query(False, description="مسح من قاعدة البيانات أيضاً")
 ):
-    """مسح كاش رموز محددة"""
+    """مسح كاش رموز محددة من Redis"""
     try:
         symbol_list = [s.strip() for s in symbols.split(",")]
         
@@ -88,33 +99,9 @@ async def clear_specific_symbols_cache(
             await redis_cache.delete(cache_key)
             
             # مسح كاش البيانات المالية
-            await financial_cache.clear_financial_cache(clean_sym)
-            
-            # مسح من قاعدة البيانات إذا طلب
-            if clear_db:
-                from app.core.database import get_db
-                db = next(get_db())
-                try:
-                    from app.models.profile import CompanyProfile
-                    from app.models.quote import StockQuote
-                    from app.models.financials import IncomeStatement, BalanceSheet, CashFlow
-                    
-                    # حذف من Profile
-                    db.query(CompanyProfile).filter(CompanyProfile.symbol == clean_sym).delete()
-                    # حذف من Quote
-                    db.query(StockQuote).filter(StockQuote.symbol == clean_sym).delete()
-                    # حذف البيانات المالية
-                    db.query(IncomeStatement).filter(IncomeStatement.symbol == clean_sym).delete()
-                    db.query(BalanceSheet).filter(BalanceSheet.symbol == clean_sym).delete()
-                    db.query(CashFlow).filter(CashFlow.symbol == clean_sym).delete()
-                    
-                    db.commit()
-                    print(f"🗑️ تم حذف بيانات {clean_sym} من PostgreSQL")
-                except Exception as e:
-                    print(f"⚠️ خطأ في حذف {clean_sym} من PostgreSQL: {e}")
-                    db.rollback()
-                finally:
-                    db.close()
+            fin_keys = await redis_cache.keys(f"financials:*:{clean_sym}:*")
+            for key in fin_keys:
+                await redis_cache.delete(key)
             
             cleared_count += 1
             print(f"🧹 تم مسح كاش {clean_sym}")
@@ -122,7 +109,6 @@ async def clear_specific_symbols_cache(
         return {
             "message": f"✅ تم مسح كاش {cleared_count} رمز",
             "cleared_symbols": symbol_list,
-            "clear_db": clear_db
         }
         
     except Exception as e:
@@ -162,81 +148,3 @@ async def cache_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"خطأ في جلب إحصائيات الكاش: {str(e)}")
-
-@router.post("/refresh/symbols")
-async def refresh_symbols_cache(
-    symbols: str = Query(..., description="رموز الأسهم مفصولة بفواصل")
-):
-    """إعادة جلب بيانات رموز محددة من API"""
-    try:
-        symbol_list = [s.strip() for s in symbols.split(",")]
-        
-        refreshed_count = 0
-        for symbol in symbol_list:
-            clean_sym = ''.join(filter(str.isdigit, symbol)).upper()
-            
-            # مسح الكاش أولاً
-            cache_key = f"tadawul_stocks:symbol:{clean_sym}:country:Saudi Arabia"
-            await redis_cache.delete(cache_key)
-            
-            # مسح كاش البيانات المالية
-            await financial_cache.clear_financial_cache(clean_sym)
-            
-            # ثم جلب البيانات من جديد (سيتم حفظها تلقائياً)
-            stock_data = await stock_cache.get_stock_by_symbol(clean_sym, "Saudi Arabia")
-            
-            if stock_data:
-                refreshed_count += 1
-                print(f"🔄 تم إعادة جلب بيانات {clean_sym}")
-            else:
-                print(f"⚠️ فشل في جلب بيانات {clean_sym}")
-        
-        return {
-            "message": f"✅ تم إعادة جلب بيانات {refreshed_count} رمز",
-            "refreshed_symbols": refreshed_count,
-            "total_requested": len(symbol_list)
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"خطأ في إعادة جلب البيانات: {str(e)}")
-
-@router.post("/refresh/financials")
-async def refresh_financials_cache(
-    symbols: str = Query(..., description="رموز الأسهم مفصولة بفواصل"),
-    period: str = Query("annual", description="الفترة: annual أو quarterly")
-):
-    """إعادة جلب البيانات المالية لرموز محددة"""
-    try:
-        symbol_list = [s.strip() for s in symbols.split(",")]
-        
-        refreshed_count = 0
-        for symbol in symbol_list:
-            clean_sym = ''.join(filter(str.isdigit, symbol)).upper()
-            
-            # مسح كاش البيانات المالية أولاً
-            await financial_cache.clear_financial_cache(clean_sym)
-            
-            # ثم جلب البيانات من جديد
-            try:
-                income_data = await financial_cache.get_income_statement(clean_sym, period)
-                balance_data = await financial_cache.get_balance_sheet(clean_sym, period)
-                cashflow_data = await financial_cache.get_cash_flow(clean_sym, period)
-                
-                if income_data.get('income_statement') or balance_data.get('balance_sheet') or cashflow_data.get('cash_flow'):
-                    refreshed_count += 1
-                    print(f"🔄 تم إعادة جلب البيانات المالية لـ {clean_sym}")
-                else:
-                    print(f"⚠️ لا توجد بيانات مالية لـ {clean_sym}")
-                    
-            except Exception as e:
-                print(f"❌ خطأ في جلب البيانات المالية لـ {clean_sym}: {e}")
-        
-        return {
-            "message": f"✅ تم إعادة جلب البيانات المالية لـ {refreshed_count} رمز",
-            "refreshed_symbols": refreshed_count,
-            "total_requested": len(symbol_list),
-            "period": period
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"خطأ في إعادة جلب البيانات المالية: {str(e)}")

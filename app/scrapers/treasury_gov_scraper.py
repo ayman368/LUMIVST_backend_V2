@@ -147,6 +147,13 @@ def scrape_treasury_gov(mode: str = "incremental"):
                 else:
                     months_to_fetch.append((today.year, today.month - 1))
 
+        elif mode == "full":
+            # سحب كل البيانات التاريخية من 1990
+            for year in range(1990, today.year + 1):
+                end_month = today.month if year == today.year else 12
+                for month in range(1, end_month + 1):
+                    months_to_fetch.append((year, month))
+
         elif mode == "backfill":
             for year in range(2018, today.year + 1):
                 end_month = today.month if year == today.year else 12
@@ -219,7 +226,9 @@ def scrape_treasury_gov(mode: str = "incremental"):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="last5days", choices=["last5days", "incremental", "backfill", "backfill_recent"])
+    parser = argparse.ArgumentParser(description="Treasury.gov Yield Curve Scraper")
+    parser.add_argument("--mode", default="incremental",
+                        choices=["incremental", "last5days", "full", "backfill", "backfill_recent"],
+                        help="incremental: الشهر الحالي | full: من 1990 | backfill: من 2018 | backfill_recent: آخر 5 سنوات")
     args = parser.parse_args()
     scrape_treasury_gov(mode=args.mode)

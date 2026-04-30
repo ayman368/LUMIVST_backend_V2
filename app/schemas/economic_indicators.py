@@ -52,19 +52,20 @@ class SP500HistoryResponse(BaseModel):
         from_attributes = True
 
 
-class SofrFuturesResponse(BaseModel):
+class EurodollarFuturesResponse(BaseModel):
     id: int
     scrape_date: date
+    symbol: Optional[str] = None
     contract: str
-    last_price: Optional[float] = None
-    change: Optional[float] = None
-    open_price: Optional[float] = None
-    high: Optional[float] = None
-    low: Optional[float] = None
-    previous: Optional[float] = None
-    volume: Optional[int] = None
-    open_interest: Optional[int] = None
-    updated_time: Optional[str] = None
+    last_price: Optional[float]
+    change: Optional[float]
+    open_price: Optional[float]
+    high: Optional[float]
+    low: Optional[float]
+    previous: Optional[float]
+    volume: Optional[int]
+    open_interest: Optional[int]
+    updated_time: Optional[str]
 
     class Config:
         from_attributes = True

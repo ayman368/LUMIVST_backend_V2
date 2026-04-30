@@ -1,12 +1,13 @@
 from typing import List, Optional
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 
 from app.core.database import get_db
-from app.models.economic_indicators import EconomicIndicator, TreasuryYieldCurve, SP500History, SofrFutures, CmeFedwatch
-from app.schemas.economic_indicators import EconomicIndicatorResponse, TreasuryYieldCurveResponse, SP500HistoryResponse, SofrFuturesResponse, CmeFedwatchResponse
+from app.models.economic_indicators import EconomicIndicator, TreasuryYieldCurve, SP500History, EurodollarFutures, CmeFedwatch
+from app.schemas.economic_indicators import EconomicIndicatorResponse, TreasuryYieldCurveResponse, SP500HistoryResponse, EurodollarFuturesResponse, CmeFedwatchResponse
 
 router = APIRouter()
 
@@ -16,6 +17,7 @@ import logging
 import threading
 
 from app.core.security import verify_internal_key
+from app.core.redis import redis_cache
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -156,22 +158,22 @@ async def clear_yield_cache():
         count += 1
     return {"message": f"Cleared {count} cached keys."}
 
-# ──────────────────── SOFR Futures ────────────────────
+# ──────────────────── Eurodollar Futures (Investing.com) ────────────────────
 
-@router.get("/scrape/sofr-futures")
-def trigger_scrape_sofr(_: bool = Depends(verify_internal_key)):
-    from app.scrapers.barchart_scraper import scrape_sofr_futures
+@router.get("/scrape/eurodollar-futures")
+def trigger_scrape_eurodollar(_: bool = Depends(verify_internal_key)):
+    from app.scrapers.eurodollar_scraper import scrape_eurodollar_futures
     
     def scrape_with_error_handling():
         try:
-            scrape_sofr_futures()
-            logger.info("SOFR futures scraping completed successfully")
+            scrape_eurodollar_futures()
+            logger.info("Eurodollar futures scraping completed successfully")
         except Exception as e:
-            logger.error(f"SOFR futures scraping failed: {e}")
+            logger.error(f"Eurodollar futures scraping failed: {e}")
     
     thread = threading.Thread(target=scrape_with_error_handling, daemon=True)
     thread.start()
-    return {"message": "Scraping started for daily SOFR Futures in background"}
+    return {"message": "Scraping started for Eurodollar Futures (Investing.com) in background"}
 
 @router.get("/scrape/sp500-pe")
 def trigger_scrape_sp500_pe(_: bool = Depends(verify_internal_key)):
@@ -236,23 +238,29 @@ def trigger_scrape_specific(indicator_code: str, mode: str = Query("update", des
             logger.error(f"Scraping for {indicator_code} failed: {e}")
     
     if indicator_code.upper() == "SP500_PE":
-        from app.scrapers.sp500_pe_scraper import scrape_sp500_pe
-        thread = threading.Thread(target=scrape_with_error_handling, args=(scrape_sp500_pe,), daemon=True)
+        from app.scrapers.gurufocus_scraper import scrape_gurufocus_indicator
+        
+        url = "https://www.gurufocus.com/economic_indicators/57/sp-500-pe-ratio"
+        
+        guru_mode = "incremental" if mode == "update" else "full"
+        max_pages = 3 if guru_mode == "incremental" else None
+        
+        thread = threading.Thread(target=scrape_with_error_handling, args=(scrape_gurufocus_indicator, url, indicator_code.upper(), guru_mode, max_pages), daemon=True)
         thread.start()
-        return {"message": "Multpl S&P 500 PE Ratio scraper started in background (full history)"}
+        return {"message": f"GuruFocus Scraping started for {indicator_code} in background (mode={guru_mode})"}
     
     if indicator_code.upper() == "SP500_EY":
         from app.scrapers.gurufocus_scraper import scrape_gurufocus_indicator
         
         url = "https://www.gurufocus.com/economic_indicators/151/sp-500-earnings-yield"
         
-        # for incremental updates, fetching the first 2-3 pages is more than enough
-        # (each page has ~15 rows, 3 pages = ~45 days coverage in case they missed running it)
-        max_pages = 3 if mode == "update" else None
+        # mode == "update" → incremental (3 pages), mode == "historical" → full (all pages)
+        guru_mode = "incremental" if mode == "update" else "full"
+        max_pages = 3 if guru_mode == "incremental" else None
         
-        thread = threading.Thread(target=scrape_with_error_handling, args=(scrape_gurufocus_indicator, url, indicator_code.upper(), max_pages), daemon=True)
+        thread = threading.Thread(target=scrape_with_error_handling, args=(scrape_gurufocus_indicator, url, indicator_code.upper(), guru_mode, max_pages), daemon=True)
         thread.start()
-        return {"message": f"GuruFocus Scraping started for {indicator_code} in background (mode={mode})"}
+        return {"message": f"GuruFocus Scraping started for {indicator_code} in background (mode={guru_mode})"}
         
     from app.scrapers.fred_scraper import scrape_fred_indicator
     thread = threading.Thread(target=scrape_with_error_handling, args=(scrape_fred_indicator, indicator_code.upper()), daemon=True)
@@ -274,64 +282,34 @@ def trigger_scrape_all(_: bool = Depends(verify_internal_key)):
     thread.start()
     return {"message": "Scraping started for all indicators in background"}
 
+# ──────────────────── Eurodollar Futures ────────────────────
 
-
-
-@router.get("/sofr-futures/latest", response_model=List[SofrFuturesResponse])
-def get_sofr_futures_latest(db: Session = Depends(get_db)):
-    """Get the most recent snapshot of all SOFR futures contracts."""
-    # Find the latest scrape_date
-    latest_date = db.query(SofrFutures.scrape_date).order_by(desc(SofrFutures.scrape_date)).first()
+@router.get("/eurodollar-futures/latest", response_model=List[EurodollarFuturesResponse])
+def get_eurodollar_futures_latest(db: Session = Depends(get_db)):
+    """Get the most recent snapshot of all Eurodollar futures contracts."""
+    latest_date = db.query(func.max(EurodollarFutures.scrape_date)).scalar()
     if not latest_date:
         return []
-    return db.query(
-        SofrFutures.id,
-        SofrFutures.scrape_date,
-        SofrFutures.contract,
-        SofrFutures.last_price,
-        SofrFutures.change,
-        SofrFutures.open_price,
-        SofrFutures.high,
-        SofrFutures.low,
-        SofrFutures.previous,
-        SofrFutures.volume,
-        SofrFutures.open_interest,
-        SofrFutures.updated_time
-    ).filter(
-        SofrFutures.scrape_date == latest_date[0]
-    ).order_by(SofrFutures.contract).all()
+    return db.query(EurodollarFutures).filter(EurodollarFutures.scrape_date == latest_date).all()
 
 
-@router.get("/sofr-futures/history/{contract}")
-def get_sofr_futures_history(
+@router.get("/eurodollar-futures/history/{contract}", response_model=List[EurodollarFuturesResponse])
+def get_eurodollar_futures_history(
     contract: str,
     limit: int = Query(365, description="Max number of daily records"),
     db: Session = Depends(get_db)
 ):
-    """Get historical data for a specific SOFR futures contract."""
-    rows = db.query(
-        SofrFutures.id,
-        SofrFutures.scrape_date,
-        SofrFutures.contract,
-        SofrFutures.last_price,
-        SofrFutures.change,
-        SofrFutures.open_price,
-        SofrFutures.high,
-        SofrFutures.low,
-        SofrFutures.previous,
-        SofrFutures.volume,
-        SofrFutures.open_interest,
-        SofrFutures.updated_time
-    ).filter(
-        SofrFutures.contract == contract
-    ).order_by(desc(SofrFutures.scrape_date)).limit(limit).all()
+    """Get historical data for a specific Eurodollar futures contract."""
+    rows = db.query(EurodollarFutures).filter(
+        EurodollarFutures.contract == contract
+    ).order_by(desc(EurodollarFutures.scrape_date)).limit(limit).all()
     return rows
 
 
-@router.get("/sofr-futures/dates")
-def get_sofr_futures_dates(db: Session = Depends(get_db)):
-    """Get all available scrape dates for SOFR futures."""
-    dates = db.query(SofrFutures.scrape_date).distinct().order_by(desc(SofrFutures.scrape_date)).all()
+@router.get("/eurodollar-futures/dates")
+def get_eurodollar_futures_dates(db: Session = Depends(get_db)):
+    """Get all available scrape dates for Eurodollar futures."""
+    dates = db.query(EurodollarFutures.scrape_date).distinct().order_by(desc(EurodollarFutures.scrape_date)).all()
     return [d[0] for d in dates]
 
 

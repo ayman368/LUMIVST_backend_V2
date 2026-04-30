@@ -15,14 +15,22 @@ from app.models.economic_indicators import EconomicIndicator
 
 logger = logging.getLogger(__name__)
 
-def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = None):
+def scrape_gurufocus_indicator(url: str, indicator_code: str, mode: str = "incremental", max_pages: int = None):
     """
     Generic scraper for GuruFocus indicators using Selenium.
-    Example: 
-      url: https://www.gurufocus.com/economic_indicators/57/sp-500-pe-ratio
-      indicator_code: SP500_PE
+    
+    mode:
+      - "incremental": سحب أحدث البيانات فقط (آخر 3 صفحات ≈ شهرين)
+      - "full": سحب كل البيانات التاريخية
     """
-    logger.info(f"🚀 Starting GuruFocus Scraper for {indicator_code}...")
+    # ── تحديد max_pages بناءً على الوضع ──
+    if max_pages is None:
+        if mode == "incremental":
+            max_pages = 3  # آخر 3 صفحات ≈ شهرين من البيانات
+            logger.info(f"📋 وضع incremental: سيتم سحب أحدث {max_pages} صفحات فقط")
+        else:  # full
+            logger.info("📋 وضع full: سيتم سحب كل الصفحات التاريخية")
+    logger.info(f"🚀 Starting GuruFocus Scraper for {indicator_code} (mode={mode})...")
 
     options = Options()
     options.add_argument("--headless")
@@ -98,6 +106,20 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = N
                     continue
         else:
             logger.warning("⚠️ Deep extraction failed. Falling back to parsing ALL pages of the HTML table via pagination.")
+            
+            # Scroll down to trigger lazy-loaded content (Historical Data section)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+            time.sleep(3)
+            
+            # Try to find and click on "Historical Data" heading or tab if present
+            try:
+                hist_section = driver.find_element(By.XPATH, "//*[contains(text(), 'Historical Data')]")
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", hist_section)
+                time.sleep(2)
+            except:
+                pass
             data_records_dict = {} # Use dict to ensure uniqueness by date: {date: {value, yoy}}
             
             page_num = 1
@@ -110,19 +132,32 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = N
                 target_table = None
                 for table in tables:
                     headers = [th.text.strip().lower() for th in table.find_all("th")]
-                    # Must match "Historical Data" table (has "yoy") NOT "Related Indicators" table
-                    if "date" in headers and "value" in headers and any("yoy" in h for h in headers):
+                    has_date = any("date" in h for h in headers)
+                    has_enough_cols = len(headers) >= 2
+                    if has_date and has_enough_cols:
                         target_table = table
                         break
+                
+                # Fallback: if no table found by <th>, try finding a table with rows containing dates
+                if not target_table:
+                    for table in tables:
+                        first_row = table.find("tr")
+                        if first_row:
+                            cells = first_row.find_all(["td", "th"])
+                            cell_texts = [c.text.strip().lower() for c in cells]
+                            if any("date" in c for c in cell_texts):
+                                target_table = table
+                                break
                         
                 if target_table:
-                    rows = target_table.find("tbody").find_all("tr")
+                    # Handle tables with or without <tbody>
+                    tbody = target_table.find("tbody")
+                    rows = tbody.find_all("tr") if tbody else target_table.find_all("tr")
                     for row in rows:
                         cols = row.find_all("td")
                         if len(cols) >= 2:
                             date_str = cols[0].text.strip()
-                            val_str = cols[1].text.strip().replace('%', '')
-                            # Capture YOY column (3rd column) if available
+                            val_str = cols[1].text.strip().replace('%', '').replace(',', '')
                             yoy_val = None
                             if len(cols) >= 3:
                                 yoy_str = cols[2].text.strip().replace('%', '').replace('+', '')
@@ -136,6 +171,8 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = N
                                 data_records_dict[dt] = {"value": val, "yoy": yoy_val}
                             except Exception as e:
                                 continue
+                else:
+                    logger.warning(f"⚠️ No matching table found on page {page_num}!")
                                 
                 logger.info(f"📄 Parsed page {page_num}... Total unique records so far: {len(data_records_dict)}")
                 
@@ -176,9 +213,13 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = N
                     logger.warning(f"Stopped pagination at page {page_num}. Reason: {str(e)[:100]}")
                     break
                     
-            # Calculate YOY manually as requested: YoY = ((Current - LastYear) / LastYear) * 100
+            # Calculate YOY only for records that don't already have it from the website
             sorted_dates = sorted(data_records_dict.keys())
             for dt in sorted_dates:
+                # Skip if YOY was already captured from the website
+                if data_records_dict[dt].get("yoy") is not None:
+                    continue
+                    
                 current_value = data_records_dict[dt]["value"]
                 
                 # Target exact same calendar date last year
@@ -255,6 +296,12 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, max_pages: int = N
         driver.quit()
 
 if __name__ == "__main__":
+    import argparse
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    scrape_gurufocus_sp500_ey = None
-    scrape_gurufocus_sp500_ey()
+    parser = argparse.ArgumentParser(description="GuruFocus Indicator Scraper")
+    parser.add_argument("--url", required=True, help="رابط المؤشر على GuruFocus")
+    parser.add_argument("--code", required=True, help="كود المؤشر (مثلاً SP500_EY)")
+    parser.add_argument("--mode", default="incremental", choices=["incremental", "full"],
+                        help="incremental: آخر صفحات | full: كل التاريخ")
+    args = parser.parse_args()
+    scrape_gurufocus_indicator(url=args.url, indicator_code=args.code, mode=args.mode)

@@ -90,9 +90,24 @@ def _build_driver():
 
 
 # ─── الدالة الرئيسية ──────────────────────────────────────────────────────────
-def scrape_cme_fedwatch() -> bool:
+def scrape_cme_fedwatch(force: bool = False) -> bool:
     logger.info("🚀 CME FedWatch scraper بيبدأ...")
     today = date.today()
+
+    # ── فحص إذا تم السحب اليوم مسبقاً ──
+    if not force:
+        from app.core.database import SessionLocal as _SL
+        from app.models.economic_indicators import CmeFedwatch as _CF
+        _db = _SL()
+        try:
+            existing_count = _db.query(_CF).filter(
+                _CF.scrape_date == today
+            ).count()
+            if existing_count > 0:
+                logger.info(f"ℹ️ تم السحب مسبقاً اليوم ({today}). يوجد {existing_count} سجل. استخدم --force لإعادة السحب.")
+                return True
+        finally:
+            _db.close()
 
     try:
         from selenium.webdriver.common.by import By
@@ -538,10 +553,14 @@ def _to_float(text: str) -> float | None:
 
 # ─── للتشغيل اليدوي ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import argparse
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%H:%M:%S",
     )
-    success = scrape_cme_fedwatch()
+    parser = argparse.ArgumentParser(description="CME FedWatch Scraper")
+    parser.add_argument("--force", action="store_true", help="إعادة السحب حتى لو تم السحب اليوم")
+    args = parser.parse_args()
+    success = scrape_cme_fedwatch(force=args.force)
     print("\n" + ("✅ نجح" if success else "❌ فشل"))
