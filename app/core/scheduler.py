@@ -109,22 +109,22 @@ def _safe(name: str, fn):
 
 
 def _clear_cache():
-    """Best-effort async cache clear from sync context."""
+    """
+    Clear economic indicator cache keys using a SYNC Redis connection.
+    APScheduler runs jobs in a background thread, so we can't reliably
+    access the async event loop. A direct sync redis.Redis call avoids
+    the 'Event loop is closed' / 'Future attached to a different loop' errors.
+    """
     try:
-        import asyncio
-        from app.core.redis import redis_cache
+        import redis as sync_redis
 
-        async def _do():
-            keys = await redis_cache.keys("economic:*")
-            for k in keys:
-                await redis_cache.delete(k)
-            logger.info(f"  🗑️ Cleared {len(keys)} cache keys")
-
-        try:
-            loop = asyncio.get_running_loop()
-            asyncio.run_coroutine_threadsafe(_do(), loop)
-        except RuntimeError:
-            asyncio.run(_do())
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        r = sync_redis.from_url(redis_url, decode_responses=True, socket_timeout=5)
+        keys = r.keys("economic:*")
+        if keys:
+            r.delete(*keys)
+        logger.info(f"  🗑️ Cleared {len(keys)} cache keys")
+        r.close()
     except Exception as e:
         logger.warning(f"  ⚠️ Cache clear skipped: {e}")
 

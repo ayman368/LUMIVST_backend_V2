@@ -57,6 +57,9 @@ yarl==1.22.0
 slowapi
 selenium
 webdriver-manager
+cloudscraper
+undetected-chromedriver
+lxml
 
 psutil
 tqdm

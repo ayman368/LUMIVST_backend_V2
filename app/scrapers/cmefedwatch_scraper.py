@@ -72,21 +72,59 @@ def _save_records(records: list[dict], today: date) -> bool:
 
 # ─── بناء الـ Driver ───────────────────────────────────────────────────────────
 def _build_driver():
-    import undetected_chromedriver as uc
+    """
+    Try standard selenium first (always available on Render),
+    then fall back to undetected_chromedriver if installed.
+    """
+    # ── Attempt 1: Standard Selenium with selenium-manager ──
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
 
-    opts = uc.ChromeOptions()
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--disable-extensions")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--disable-software-rasterizer")
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-    driver = uc.Chrome(options=opts, headless=False, use_subprocess=True)
-    driver.set_page_load_timeout(120)
-    driver.set_script_timeout(60)
-    return driver
+        logger.info("  🔄 Trying standard selenium (selenium-manager)…")
+        driver = webdriver.Chrome(options=opts)
+        driver.set_page_load_timeout(120)
+        driver.set_script_timeout(60)
+        logger.info("  ✅ Standard selenium driver created successfully")
+        return driver
+    except Exception as e:
+        logger.warning(f"  ⚠️ Standard selenium failed: {e}")
+
+    # ── Attempt 2: undetected_chromedriver ──
+    try:
+        import undetected_chromedriver as uc
+
+        opts = uc.ChromeOptions()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+
+        logger.info("  🔄 Trying undetected_chromedriver…")
+        driver = uc.Chrome(options=opts, headless=True)
+        driver.set_page_load_timeout(120)
+        driver.set_script_timeout(60)
+        logger.info("  ✅ undetected_chromedriver created successfully")
+        return driver
+    except Exception as e:
+        logger.error(f"  ❌ undetected_chromedriver also failed: {e}")
+        raise RuntimeError("Could not create any Chrome driver")
+
 
 
 # ─── الدالة الرئيسية ──────────────────────────────────────────────────────────
