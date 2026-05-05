@@ -42,13 +42,10 @@ def job_daily_scrapers():
             "app.scrapers.fred_scraper", fromlist=["scrape_fred_indicator"]
         ).scrape_fred_indicator(c))
 
-    _safe("Eurodollar", lambda: __import__(
-        "app.scrapers.eurodollar_scraper", fromlist=["scrape_eurodollar_futures"]
-    ).scrape_eurodollar_futures(save_db=True))
-
-    _safe("CME FedWatch", lambda: __import__(
-        "app.scrapers.cmefedwatch_scraper", fromlist=["scrape_cme_fedwatch"]
-    ).scrape_cme_fedwatch())
+    # ── Eurodollar & CME FedWatch: run MANUALLY from Admin Dashboard ──
+    # Eurodollar: Investing.com blocks Render's server IPs (403).
+    # CME FedWatch: QuikStrike returns error page from server IPs.
+    # Both work fine when run locally → use Admin "Run Now" buttons.
 
     _clear_cache()
     logger.info("📅 [Scheduler] DAILY scrapers finished.")

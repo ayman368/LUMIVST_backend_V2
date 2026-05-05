@@ -213,40 +213,10 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, mode: str = "incre
                     logger.warning(f"Stopped pagination at page {page_num}. Reason: {str(e)[:100]}")
                     break
                     
-            # Calculate YOY only for records that don't already have it from the website
-            sorted_dates = sorted(data_records_dict.keys())
-            for dt in sorted_dates:
-                # Skip if YOY was already captured from the website
-                if data_records_dict[dt].get("yoy") is not None:
-                    continue
-                    
-                current_value = data_records_dict[dt]["value"]
-                
-                # Target exact same calendar date last year
-                try:
-                    target_date = dt.replace(year=dt.year - 1)
-                except ValueError:
-                    # Handles Feb 29 on leap years -> fallback to Feb 28
-                    target_date = dt.replace(year=dt.year - 1, day=28)
-                
-                # Find the closest date available in our dataset on or before the target date
-                last_year_value = None
-                for i in range(10): # Check up to 10 days before target date
-                    check_date = target_date - timedelta(days=i)
-                    if check_date in data_records_dict:
-                        last_year_value = data_records_dict[check_date]["value"]
-                        break
-                        
-                if last_year_value and last_year_value != 0:
-                    yoy = ((current_value - last_year_value) / last_year_value) * 100
-                    # Round to 2 decimal places
-                    data_records_dict[dt]["yoy"] = round(yoy, 2)
-                else:
-                    data_records_dict[dt]["yoy"] = None
-
-            # Convert dict back to list format expected by the next steps
+            # We will calculate YOY later using the database history
             for dt, record in data_records_dict.items():
-                data_records.append({"date": dt, "value": record["value"], "yoy": record["yoy"]})
+                data_records.append({"date": dt, "value": record["value"], "yoy": record.get("yoy")})
+
                     
         if not data_records:
             logger.warning("⚠️ No valid records parsed from table.")
@@ -261,22 +231,53 @@ def scrape_gurufocus_indicator(url: str, indicator_code: str, mode: str = "incre
                 r.report_date: r for r in db.query(EconomicIndicator).filter(EconomicIndicator.indicator_code == indicator_code).all()
             }
             
+            # Build a lookup dictionary combining DB records and newly scraped records
+            # so we can calculate YOY using full historical context.
+            full_history_lookup = {}
+            for dt, r in existing_records.items():
+                full_history_lookup[dt] = r.value
+            for record in data_records:
+                full_history_lookup[record["date"]] = record["value"]
+                
             new_objs = []
             updated_count = 0
+            
             for record in data_records:
-                if record["date"] in existing_records:
-                    # Update existing record with YOY if we have it and it's missing
-                    existing = existing_records[record["date"]]
-                    yoy_val = record.get("yoy")
+                dt = record["date"]
+                current_value = record["value"]
+                yoy_val = record.get("yoy")
+                
+                # If YOY is missing, calculate it using the full history lookup
+                if yoy_val is None:
+                    try:
+                        target_date = dt.replace(year=dt.year - 1)
+                    except ValueError:
+                        target_date = dt.replace(year=dt.year - 1, day=28)
+                        
+                    last_year_value = None
+                    for i in range(10): # Check up to 10 days before target date
+                        check_date = target_date - timedelta(days=i)
+                        if check_date in full_history_lookup:
+                            last_year_value = full_history_lookup[check_date]
+                            break
+                            
+                    if last_year_value and last_year_value != 0:
+                        yoy_val = round(((current_value - last_year_value) / last_year_value) * 100, 2)
+                
+                if dt in existing_records:
+                    existing = existing_records[dt]
+                    # Update existing record if value changed OR if YOY changed/was calculated
+                    if existing.value != current_value:
+                        existing.value = current_value
                     if yoy_val is not None and existing.yoy_pct != yoy_val:
                         existing.yoy_pct = yoy_val
                         updated_count += 1
                 else:
                     new_objs.append(EconomicIndicator(
-                        report_date=record["date"],
+                        report_date=dt,
                         indicator_code=indicator_code,
-                        value=record["value"],
-                        yoy_pct=record.get("yoy")
+                        value=current_value,
+                        yoy_pct=yoy_val
                     ))
             
             if new_objs:

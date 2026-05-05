@@ -1,34 +1,58 @@
 """
-CME FedWatch Tool Scraper - نسخة مصلّحة للـ Parser
-====================================================
-المشكلة: جدول QuikStrike بيجي في شكلين:
-  1. خلايا مدمجة بـ \\n و \\t في نفس الـ row (table[1])
-  2. جداول منفصلة بـ header عادي (table[2,3,4])
+CME FedWatch Scraper — ASP.NET UpdatePanel (requests فقط، بدون Selenium)
+=========================================================================
 
-الـ parser القديم كان بيفشل في شكل 1 لأنه:
-  - بيعتبر row[0] header لأنه فيه "meeting date" كجزء من النص المدمج
-  - الـ rows التالية مش بيانات حقيقية فبيرجع قائمة فاضية
+كيف يشتغل QuikStrike:
+  1. الصفحة بتحمّل عبر GET → بترجع HTML فيه __VIEWSTATE + insid + qsid
+  2. لما تضغط "Probabilities" في الـ sidebar:
+     - المتصفح يبعت POST لنفس الـ URL
+     - الـ body فيه: __VIEWSTATE + __EVENTTARGET=...lbPTree + باقي الـ fields
+     - الـ response: UpdatePanel delta (HTML fragments مش JSON)
+  3. نحلّل الـ HTML delta ونستخرج الجدول
 
-الحل: _try_parse_merged_cells() تحلّل النص المدمج مباشرة
-      + تنظيف الـ headers من \\n و \\t في كل الأشكال
+المعطيات من DevTools (بتتغير كل session):
+  - insid: 220458043  (أو 218288033 في القديم)
+  - qsid:  e57fa5e6-90f6-4304-bff7-f6884355ac04
+  - __EVENTTARGET: ctl00$MainContent$ucViewControl_IntegratedFedWatchTool$lbPTree
+  
+ملاحظة: insid وqsid بيتغيروا — لازم نجيبهم من الصفحة كل مرة.
 """
 
+import re
 import time
-import json
 import logging
+import urllib.parse
 from datetime import date, datetime
+
+import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-QUIKSTRIKE_DIRECT_URL = (
-    "https://cmegroup-tools.quikstrike.net/User/QuikStrikeView.aspx"
-    "?viewitemid=IntegratedFedWatchTool"
-    "&insid=218288033"
-    "&qsid=97a804a0-4076-406c-ade5-7148f4e9dafa"
-)
+# ─── URLs ─────────────────────────────────────────────────────────────────────
 CME_MAIN_URL = (
     "https://www.cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html"
 )
+# URL الـ QuikStrike الأساسي — الـ insid وqsid بيتجيبوا من الـ iframe src
+QUIKSTRIKE_BASE = "https://cmegroup-tools.quikstrike.net/User/QuikStrikeView.aspx"
+
+# الـ EVENTTARGET لما بتضغط "Probabilities" في الـ sidebar
+EVENTTARGET_PROBABILITIES = (
+    "ctl00$MainContent$ucViewControl_IntegratedFedWatchTool$lbPTree"
+)
+
+HEADERS_BROWSER = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/147.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 
 # ─── حفظ في DB ────────────────────────────────────────────────────────────────
@@ -70,506 +94,519 @@ def _save_records(records: list[dict], today: date) -> bool:
         db.close()
 
 
-# ─── بناء الـ Driver ───────────────────────────────────────────────────────────
-def _build_driver():
-    """
-    Try standard selenium first (always available on Render),
-    then fall back to undetected_chromedriver if installed.
-    """
-    # ── Attempt 1: Standard Selenium with selenium-manager ──
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-
-        opts = Options()
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-software-rasterizer")
-        opts.add_argument("--disable-extensions")
-        opts.add_argument("--window-size=1920,1080")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-
-        logger.info("  🔄 Trying standard selenium (selenium-manager)…")
-        driver = webdriver.Chrome(options=opts)
-        driver.set_page_load_timeout(120)
-        driver.set_script_timeout(60)
-        logger.info("  ✅ Standard selenium driver created successfully")
-        return driver
-    except Exception as e:
-        logger.warning(f"  ⚠️ Standard selenium failed: {e}")
-
-    # ── Attempt 2: undetected_chromedriver ──
-    try:
-        import undetected_chromedriver as uc
-
-        opts = uc.ChromeOptions()
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-software-rasterizer")
-        opts.add_argument("--disable-extensions")
-        opts.add_argument("--window-size=1920,1080")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-
-        logger.info("  🔄 Trying undetected_chromedriver…")
-        driver = uc.Chrome(options=opts, headless=True)
-        driver.set_page_load_timeout(120)
-        driver.set_script_timeout(60)
-        logger.info("  ✅ undetected_chromedriver created successfully")
-        return driver
-    except Exception as e:
-        logger.error(f"  ❌ undetected_chromedriver also failed: {e}")
-        raise RuntimeError("Could not create any Chrome driver")
-
-
-
 # ─── الدالة الرئيسية ──────────────────────────────────────────────────────────
 def scrape_cme_fedwatch(force: bool = False) -> bool:
     logger.info("🚀 CME FedWatch scraper بيبدأ...")
     today = date.today()
 
-    # ── فحص إذا تم السحب اليوم مسبقاً ──
     if not force:
         from app.core.database import SessionLocal as _SL
         from app.models.economic_indicators import CmeFedwatch as _CF
         _db = _SL()
         try:
-            existing_count = _db.query(_CF).filter(
-                _CF.scrape_date == today
-            ).count()
-            if existing_count > 0:
-                logger.info(f"ℹ️ تم السحب مسبقاً اليوم ({today}). يوجد {existing_count} سجل. استخدم --force لإعادة السحب.")
+            cnt = _db.query(_CF).filter(_CF.scrape_date == today).count()
+            if cnt > 0:
+                logger.info(f"ℹ️ تم السحب مسبقاً ({today}): {cnt} سجل.")
                 return True
         finally:
             _db.close()
 
+    # ── استخدام cloudscraper لتخطي الحماية ──
     try:
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
+        import cloudscraper
+        session = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
     except ImportError:
-        logger.error("❌ selenium غير مثبّت")
+        logger.warning("⚠️ cloudscraper غير متوفر، سنستخدم requests العادي")
+        session = requests.Session()
+
+    session.headers.update(HEADERS_BROWSER)
+
+    # ══ Step 1: نجيب iframe URL من CME الرئيسية ══════════════════════════════
+    logger.info("🌐 Step 1: جلب CME الرئيسية لاستخراج iframe URL...")
+    iframe_url = _get_iframe_url(session)
+
+    if not iframe_url:
+        logger.error("❌ لم نجد الـ iframe URL")
         return False
 
-    driver = _build_driver()
+    logger.info(f"✅ iframe URL: {iframe_url[:100]}")
 
-    try:
-        # ── الخطوة 1: فتح صفحة CME FedWatch ─────────────────────────────────
-        logger.info("🌐 فتح صفحة CME FedWatch...")
-        driver.get(CME_MAIN_URL)
+    # ══ Step 2: نفتح الـ iframe (GET) (الـ Shell) ══════════════════════════════
+    logger.info("🌐 Step 2: تحميل QuikStrike iframe (shell)...")
+    page_data = _load_quikstrike_page(session, iframe_url)
 
-        try:
-            WebDriverWait(driver, 25).until(
-                EC.presence_of_element_located(("tag name", "body"))
-            )
-        except Exception:
-            pass
-
-        time.sleep(15)
-
-        page_title = driver.title
-        current_url = driver.current_url
-        logger.info(f"📄 Page: '{page_title}' @ {current_url[:60]}")
-
-        # ── الخطوة 2: دوّر على iframe QuikStrike ────────────────────────────
-        iframe_found = False
-
-        try:
-            iframe_info = driver.execute_script("""
-                var iframes = document.querySelectorAll('iframe');
-                var result = [];
-                for (var i = 0; i < iframes.length; i++) {
-                    result.push({
-                        idx: i,
-                        src: iframes[i].src || '',
-                        id: iframes[i].id || '',
-                        cls: iframes[i].className || '',
-                        w: iframes[i].offsetWidth,
-                        h: iframes[i].offsetHeight
-                    });
-                }
-                return JSON.stringify(result);
-            """)
-            import json as json_mod
-            frames = json_mod.loads(iframe_info)
-            logger.info(f"🔍 {len(frames)} iframe(s) found:")
-            for f in frames:
-                logger.info(f"   [{f['idx']}] src={f['src'][:80]} id={f['id']} size={f['w']}x{f['h']}")
-
-            for f in frames:
-                src = f['src'].lower()
-                if f['w'] < 100 or f['h'] < 100:
-                    continue
-                if 'quikstrike' in src:
-                    all_iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    if f['idx'] < len(all_iframes):
-                        driver.switch_to.frame(all_iframes[f['idx']])
-                        iframe_found = True
-                        logger.info(f"✅ دخلت iframe [{f['idx']}] بنجاح!")
-                        break
-
-            if not iframe_found and frames:
-                largest = max(frames, key=lambda x: x['w'] * x['h'])
-                if largest['w'] > 100 and largest['h'] > 100:
-                    all_iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                    if largest['idx'] < len(all_iframes):
-                        driver.switch_to.frame(all_iframes[largest['idx']])
-                        iframe_found = True
-                        logger.info(f"✅ دخلت أكبر iframe [{largest['idx']}] ({largest['w']}x{largest['h']})")
-
-        except Exception as e:
-            logger.warning(f"⚠️ JS iframe scan error: {e}")
-
-        if not iframe_found:
-            logger.warning("⚠️ مفيش iframe — جرب QuikStrike مباشرة...")
-            driver.get(QUIKSTRIKE_DIRECT_URL)
-            time.sleep(5)
-
-        # ── الخطوة 3: انتظر الجدول الفعلي ────────────────────────────────────
-        logger.info("⏳ انتظار جدول FedWatch...")
-        table_loaded = False
-        try:
-            WebDriverWait(driver, 40).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "table.grid-thm")
-                )
-            )
-            table_loaded = True
-            logger.info("✅ جدول grid-thm تحمّل")
-        except Exception:
-            logger.warning("⚠️ grid-thm لم يظهر — سأجرب tbody")
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "tbody"))
-                )
-                table_loaded = True
-                logger.info("✅ tbody تحمّل")
-            except Exception:
-                logger.warning("⚠️ لم يظهر أي جدول — سأحاول التحليل")
-
-        time.sleep(2)
-
-        # ── الخطوة 4: انقر على Probabilities ────────────────────────────────
-        _try_click(driver, "Probabilities")
-
-        # ── الخطوة 5: استخرج البيانات ────────────────────────────────────────
-        records = _extract(driver, today)
-
-        if not records:
-            logger.error(
-                f"❌ فشل الاستخراج.\n"
-                f"   Title: {driver.title}\n"
-                f"   table_loaded: {table_loaded}\n"
-                f"   DOM (2000 حرف): {driver.page_source[:2000]}"
-            )
-            return False
-
-        logger.info(f"✅ {len(records)} سجل جاهز للحفظ")
-        return _save_records(records, today)
-
-    except Exception as exc:
-        logger.error(f"❌ خطأ عام: {exc}", exc_info=True)
+    if not page_data:
+        logger.error("❌ فشل تحميل QuikStrike iframe")
         return False
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
 
-
-# ─── النقر على تبويب ──────────────────────────────────────────────────────────
-def _try_click(driver, text: str) -> bool:
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    # الطريقة الأقوى: JavaScript للبحث عن النص في التبويبات العلوية حصراً
-    try:
-        success = driver.execute_script(f"""
-            // نبحث في الروابط اللي جوه قوائم أو تابات
-            var els = document.querySelectorAll('.nav a, .tabs a, ul li a, button, span.tab-text');
-            if (els.length === 0) els = document.querySelectorAll('a, span, li, button, div');
+    # ══ Step 2b: نبعت POST أولي عشان نجيب insid و qsid الجداد ═══════════════
+    logger.info("📡 Step 2b: POST أولي لتهيئة الـ Session...")
+    init_resp = _post_probabilities(session, page_data)
+    new_insid = ""
+    new_qsid = ""
+    
+    if init_resp:
+        import re as _re
+        fa_match = _re.search(r'formAction\|\|([^\|]+)', init_resp)
+        if fa_match:
+            new_action = fa_match.group(1)
+            new_url = urllib.parse.urljoin(page_data['post_url'], new_action)
+            parsed_new = urllib.parse.urlparse(new_url)
+            qs_new = urllib.parse.parse_qs(parsed_new.query)
+            new_insid = qs_new.get("insid", [""])[0]
+            new_qsid  = qs_new.get("qsid",  [""])[0]
+            logger.info(f"✅ تم سحب insid={new_insid} | qsid={new_qsid[:8]}...")
             
-            for (var i = 0; i < els.length; i++) {{
-                var t = els[i].innerText || els[i].textContent || '';
-                if (t.trim().toLowerCase() === '{text.lower()}') {{
-                    els[i].click();
-                    return true;
-                }}
-            }}
-            return false;
-        """)
-        if success:
-            logger.info(f"✅ نقرت على '{text}' بنجاح باستخدام JS")
-            time.sleep(6)  # زودنا الانتظار لأن الجدول الكبير بياخد وقت أطول ليحمل 
-            return True
-    except Exception as e:
-        logger.warning(f"⚠️ JS click error: {e}")
+    if not new_insid or not new_qsid:
+        logger.error("❌ فشل في جلب Session IDs")
+        return False
 
-    # Fallback للطريقة التقليدية
-    for by, sel in [
-        (By.LINK_TEXT,         text),
-        (By.PARTIAL_LINK_TEXT, text[:6]),
-    ]:
-        try:
-            el = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((by, sel))
-            )
-            el.click()
-            logger.info(f"✅ نقرت على '{text}'")
-            time.sleep(6)
-            return True
-        except Exception:
-            pass
+    # ══ Step 3: تحميل صفحة الأداة الفعلية (QuikStrikeView.aspx) ════════════
+    logger.info("🌐 Step 3: تحميل صفحة الأداة الفعلية...")
+    view_url = (
+        f"https://cmegroup-tools.quikstrike.net/User/QuikStrikeView.aspx"
+        f"?viewitemid=IntegratedFedWatchTool"
+        f"&insid={new_insid}"
+        f"&qsid={new_qsid}"
+    )
+    
+    view_data = _load_quikstrike_page(session, view_url)
+    if not view_data:
+        logger.error("❌ فشل تحميل صفحة الأداة")
+        return False
 
-    logger.warning(f"⚠️ لم أجد '{text}'")
-    return False
+    # ══ Step 4: نبعت POST لـ "Probabilities" من جوه صفحة الأداة ═════════════
+    logger.info("📡 Step 4: POST → Probabilities tab...")
+    html_delta = _post_probabilities(session, view_data)
+
+    if not html_delta:
+        logger.error("❌ فشل POST للـ Probabilities")
+        return False
+
+    # ══ Step 5: نحلّل الـ HTML ونستخرج الجدول ════════════════════════════════
+    logger.info("📊 Step 5: تحليل الجدول...")
+    records = _parse_probabilities_html(html_delta, today)
+
+    if not records:
+        logger.warning("⚠️ لم نجد Rate Ranges، نجرب Aggregated...")
+        records = _parse_aggregated_html(html_delta, today)
+
+    if not records:
+        logger.error(f"❌ لا بيانات. HTML[0:2000]:\n{html_delta[:2000]}")
+        return False
+
+    logger.info(f"✅ {len(records)} سجل")
+    return _save_records(records, today)
 
 
-# ─── استخراج البيانات بـ JavaScript ──────────────────────────────────────────
-def _extract(driver, today: date) -> list[dict]:
-    js = r"""
-    var out = {tables: []};
-    document.querySelectorAll('table').forEach(function(tbl, ti) {
-        var tdata = {index: ti, cls: tbl.className, rows: []};
-        tbl.querySelectorAll('tr').forEach(function(tr) {
-            var cells = [];
-            tr.querySelectorAll('td,th').forEach(function(td) {
-                var txt = (td.innerText || td.textContent || '').trim();
-                cells.push(txt);
-            });
-            if (cells.some(function(c){ return c !== ''; }))
-                tdata.rows.push(cells);
-        });
-        if (tdata.rows.length) out.tables.push(tdata);
-    });
-    return JSON.stringify(out);
+# ─── Step 1: استخراج iframe URL من CME ───────────────────────────────────────
+def _get_iframe_url(session: requests.Session) -> str | None:
+    """
+    يجيب URL الـ iframe الخاص بـ QuikStrike من صفحة CME الرئيسية.
+    الـ URL فيه insid وqsid الخاصة بالـ session.
     """
     try:
-        data = json.loads(driver.execute_script(js))
-    except Exception as e:
-        logger.error(f"❌ JS error: {e}")
-        return []
+        resp = session.get(CME_MAIN_URL, timeout=30)
+        logger.info(f"   CME main: {resp.status_code}")
 
-    logger.info(f"📋 عدد الجداول: {len(data['tables'])}")
-    for tbl in data["tables"]:
-        logger.info(
-            f"   table[{tbl['index']}] cls='{tbl['cls']}' "
-            f"({len(tbl['rows'])} rows) → {tbl['rows'][:2]}"
+        if resp.status_code != 200:
+            # بعض الـ servers بترفض — نجرب بـ headers مختلفة
+            session.headers.update({"Accept": "text/html,application/xhtml+xml,*/*"})
+            resp = session.get(CME_MAIN_URL, timeout=30)
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # ابحث عن iframe بـ quikstrike
+        for iframe in soup.find_all("iframe"):
+            src = iframe.get("src", "")
+            if "quikstrike" in src.lower() or "QuikStrike" in src:
+                return src if src.startswith("http") else f"https://cmegroup-tools.quikstrike.net{src}"
+
+        # ابحث في الـ scripts كـ fallback
+        for script in soup.find_all("script"):
+            text = script.string or ""
+            match = re.search(
+                r'(https://cmegroup-tools\.quikstrike\.net[^\s\'"]+FedWatch[^\s\'"]+)',
+                text
+            )
+            if match:
+                return match.group(1)
+
+        # fallback: نبني الـ URL من المعطيات المعروفة
+        # نجيب insid وqsid من الـ source
+        match_insid = re.search(r'insid[=:](\d+)', resp.text)
+        match_qsid  = re.search(
+            r'qsid[=:]["\']?([a-f0-9\-]{36})', resp.text, re.IGNORECASE
         )
 
+        if match_insid and match_qsid:
+            insid = match_insid.group(1)
+            qsid  = match_qsid.group(1)
+            url = (
+                f"{QUIKSTRIKE_BASE}"
+                f"?viewitemid=IntegratedFedWatchTool"
+                f"&insid={insid}"
+                f"&qsid={qsid}"
+            )
+            logger.info(f"   Built URL from page source: {url[:80]}")
+            return url
+
+    except Exception as e:
+        logger.error(f"   ❌ _get_iframe_url error: {e}")
+
+    return None
+
+
+# ─── Step 2: تحميل صفحة QuikStrike واستخراج الـ form fields ──────────────────
+def _load_quikstrike_page(session: requests.Session, url: str) -> dict | None:
+    """
+    يحمّل صفحة QuikStrike ويستخرج:
+      - __VIEWSTATE
+      - __VIEWSTATEGENERATOR
+      - __EVENTVALIDATION (لو موجود)
+      - insid, qsid (من الـ form action)
+      - كل الـ hidden fields في الـ form
+    """
+    try:
+        headers = {
+            **HEADERS_BROWSER,
+            "Accept":  "text/html,application/xhtml+xml,*/*;q=0.9",
+            "Referer": CME_MAIN_URL,
+        }
+        resp = session.get(url, headers=headers, timeout=40)
+        logger.info(f"   QuikStrike GET: {resp.status_code} | {len(resp.text)} chars")
+
+        if resp.status_code != 200:
+            logger.error(f"   ❌ Status {resp.status_code}")
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # ── استخراج post_url من الـ form action ──
+        post_url = resp.url
+        form = soup.find("form")
+        if form and form.get("action"):
+            action = form["action"]
+            if action.startswith("./"):
+                action = action[2:]
+            post_url = urllib.parse.urljoin(resp.url, action)
+
+        # استخرج insid وqsid من الـ post_url
+        parsed = urllib.parse.urlparse(post_url)
+        qs     = urllib.parse.parse_qs(parsed.query)
+        insid  = qs.get("insid", [""])[0]
+        qsid   = qs.get("qsid",  [""])[0]
+
+        # استخرج كل الـ hidden inputs
+        form_fields: dict[str, str] = {}
+        for inp in soup.find_all("input", type="hidden"):
+            name  = inp.get("name", "")
+            value = inp.get("value", "")
+            if name:
+                form_fields[name] = value
+
+        # تحقق من وجود __VIEWSTATE
+        if "__VIEWSTATE" not in form_fields:
+            logger.error("   ❌ __VIEWSTATE غير موجود في الصفحة")
+            logger.error(f"   DOM[0:500]: {resp.text[:500]}")
+            return None
+
+        logger.info(
+            f"   ✅ form_fields: {list(form_fields.keys())[:8]}... "
+            f"(__VIEWSTATE len={len(form_fields['__VIEWSTATE'])})"
+        )
+
+        return {
+            "post_url":    post_url,
+            "insid":       insid,
+            "qsid":        qsid,
+            "form_fields": form_fields,
+            "referer":     url,
+            "soup":        soup,
+        }
+
+    except Exception as e:
+        logger.error(f"   ❌ _load_quikstrike_page error: {e}", exc_info=True)
+        return None
+
+
+# ─── Step 3: POST → Probabilities tab ─────────────────────────────────────────
+def _post_probabilities(session: requests.Session, page_data: dict) -> str | None:
+    """
+    يبعت POST request بنفس الـ body اللي شفناه في DevTools
+    لـ trigger الـ "Probabilities" UpdatePanel.
+
+    الـ __EVENTTARGET هو المفتاح:
+      ctl00$MainContent$ucViewControl_IntegratedFedWatchTool$lbPTree
+    """
+    insid       = page_data["insid"]
+    qsid        = page_data["qsid"]
+    form_fields = page_data["form_fields"]
+    post_url    = page_data["post_url"]
+    referer     = page_data["referer"]
+
+    # ── بناء الـ POST body ────────────────────────────────────────────────────
+    # نبدأ بكل الـ hidden fields من الصفحة
+    body = dict(form_fields)
+
+    # الحقول الإضافية اللي بيبعتها المتصفح
+    body.update({
+        # UpdatePanel trigger
+        "ctl00$smPublic": (
+            f"ctl00$upMain|{EVENTTARGET_PROBABILITIES}"
+        ),
+        "__EVENTTARGET":  EVENTTARGET_PROBABILITIES,
+        "__EVENTARGUMENT": "",
+        "__LASTFOCUS":    "",
+        "__ASYNCPOST":    "true",
+
+        # حقول ثابتة من الـ form
+        "ctl00$global_attributes": "",
+        "ctl00$global_mobile":     "",
+        "ctl00$page_title":        "",
+        "ctl00$MainContent$global_viewAttributes": "",
+        "ctl00$MainContent$ucViewControl_IntegratedFedWatchTool$ucTweet$twittercard_title": (
+            "FedWatch Tool"
+        ),
+        "ctl00$ucFix$calendarFix": "",
+    })
+
+    headers = {
+        **HEADERS_BROWSER,
+        "Accept":               "*/*",
+        "Content-Type":         "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-MicrosoftAjax":      "Delta=true",
+        "X-Requested-With":     "XMLHttpRequest",
+        "Referer":              referer,
+        "Origin":               "https://cmegroup-tools.quikstrike.net",
+        "Sec-Fetch-Dest":       "empty",
+        "Sec-Fetch-Mode":       "cors",
+        "Sec-Fetch-Site":       "same-origin",
+        "Sec-Fetch-Storage-Access": "active",
+    }
+
+    try:
+        logger.info(f"   POST → {post_url[:80]}")
+        resp = session.post(
+            post_url,
+            data=body,
+            headers=headers,
+            timeout=40,
+        )
+        logger.info(f"   POST response: {resp.status_code} | {len(resp.text)} chars")
+
+        if resp.status_code != 200:
+            logger.error(f"   ❌ POST failed: {resp.status_code}")
+            logger.error(f"   Response: {resp.text[:500]}")
+            return None
+
+        return resp.text
+
+    except Exception as e:
+        logger.error(f"   ❌ POST error: {e}", exc_info=True)
+        return None
+
+
+# ─── Step 4a: تحليل Conditional Meeting Probabilities (Rate Ranges) ───────────
+def _parse_probabilities_html(html: str, today: date) -> list[dict]:
+    """
+    يحلّل الـ HTML Delta اللي بيرجع من UpdatePanel.
+
+    الـ UpdatePanel response بيكون بالشكل ده:
+      length|updatePanel|panelId|HTML_CONTENT|...
+
+    نستخرج HTML_CONTENT ونحلّل الجدول منه:
+        MEETING DATE | 250-275 | 275-300 | ... | 425-450
+        6/17/2026    |   0.0%  |   0.0%  | ... |   0.0%
+    """
+    # ── استخرج HTML من UpdatePanel delta format ───────────────────────────────
+    html_content = _extract_updatepanel_html(html)
+
+    # ── حلّل كل الجداول في الـ HTML ──────────────────────────────────────────
+    soup = BeautifulSoup(html_content, "html.parser")
     records = []
-    for tbl in data["tables"]:
-        parsed = _parse_fedwatch_table(tbl["rows"], today)
-        if parsed:
-            records.extend(parsed)
-            logger.info(f"   ✅ table[{tbl['index']}] → {len(parsed)} سجل")
 
-    return records
+    for tbl in soup.find_all("table"):
+        rows = tbl.find_all("tr")
+        if len(rows) < 2:
+            continue
 
+        # ابحث عن header row بـ rate ranges
+        header_idx   = None
+        rate_cols    = []  # list of (col_index, "NNN-NNN")
 
-# ─── تحليل الجدول (مُصلَح) ────────────────────────────────────────────────────
-def _parse_fedwatch_table(rows: list[list[str]], today: date) -> list[dict]:
-    """
-    يتعامل مع 3 أشكال للجدول:
+        for ri, tr in enumerate(rows):
+            cells = tr.find_all(["td", "th"])
+            cell_texts = [c.get_text(strip=True) for c in cells]
 
-    شكل 1 — نص مدمج في خلايا (table[1] في الـ logs):
-        خلية تحتوي: "29 Apr 2026\\tZQJ6\\t..."
-        خلية أخرى:  "0.0 %\\t99.5 %\\t0.5 %"
-        → تُحلَّل بـ _try_parse_merged_cells()
+            has_meeting_date = any(
+                "meeting" in t.lower() for t in cell_texts
+            )
+            ranges_in_row = [
+                (ci, t)
+                for ci, t in enumerate(cell_texts)
+                if ci > 0 and re.match(r'^\d{3}-\d{3}$', t)
+            ]
 
-    شكل 2 — Rate Ranges (الأعمدة = نطاقات سعرية "NNN-NNN"):
-        ['MEETING DATE', '200-225', '225-250', ..., '375-400']
-        ['4/29/2026',   '0.0%',    '0.0%',   ..., '97.9%'  ]
+            if has_meeting_date and ranges_in_row:
+                header_idx = ri
+                rate_cols  = ranges_in_row
+                logger.info(
+                    f"   ✅ Found Probabilities table "
+                    f"(row {ri}, {len(rate_cols)} rate ranges)"
+                )
+                break
 
-    شكل 3 — Aggregated (الأعمدة = EASE / NO CHANGE / HIKE):
-        ['MEETING DATE', 'EASE', 'NO CHANGE', 'HIKE']
-        ['4/29/2026',    '0.0%', '97.9%',    '2.1%']
-    """
-    if not rows:
-        return []
+        if header_idx is None:
+            continue
 
-    # ══ أول: جرب الـ header العادي (Rate Ranges أو Aggregated) ══════════════
-    # مهم: لازم نجرب ده الأول عشان الـ merged cells parser ممكن يلتقط القيم الغلط
-    header_idx = None
-    for i, row in enumerate(rows):
-        flat = [c.split("\n")[0].split("\t")[0].strip().lower() for c in row]
-        if any("meeting date" in c for c in flat):
-            header_idx = i
-            break
-
-    if header_idx is not None:
-        header = [c.split("\n")[0].split("\t")[0].strip() for c in rows[header_idx]]
-        logger.info(f"   Header (row {header_idx}): {header}")
-        records = []
-
-        # ── شكل 1: Rate Ranges ──────────────────────────────────────────────
-        rate_cols = []
-        for ci, col in enumerate(header):
-            if ci == 0:
+        # استخرج البيانات
+        for tr in rows[header_idx + 1:]:
+            cells     = tr.find_all(["td", "th"])
+            if not cells:
                 continue
-            parts = col.strip().split("-")
-            if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
-                rate_cols.append((ci, col.strip()))
-
-        if rate_cols:
-            logger.info(f"   → شكل 1 (Rate Ranges): {[r for _, r in rate_cols]}")
-            for row in rows[header_idx + 1:]:
-                if not row or not row[0].strip():
-                    continue
-                raw_date = row[0].split("\n")[0].split("\t")[0].strip()
-                meeting_date = _parse_date(raw_date)
-                if not meeting_date:
-                    continue
-                meeting_date_str = meeting_date.strftime("%Y-%m-%d")
-                for ci, rate_range in rate_cols:
-                    if ci >= len(row):
-                        continue
-                    prob = _to_float(row[ci])
-                    if prob is None:
-                        continue
-                    records.append({
-                        "scrape_date":  today,
-                        "meeting_date": meeting_date_str,
-                        "rate_range":   rate_range,
-                        "probability":  prob,
-                    })
-            return records
-
-        # ── شكل 2: Ease / No Change / Hike ──────────────────────────────────
-        label_cols = []
-        for ci, col in enumerate(header):
-            cl = col.strip().lower()
-            if "ease" in cl:
-                label_cols.append((ci, "Ease"))
-            elif "no change" in cl or "no_change" in cl:
-                label_cols.append((ci, "No Change"))
-            elif "hike" in cl:
-                label_cols.append((ci, "Hike"))
-
-        if label_cols:
-            logger.info(f"   → شكل 2 (Aggregated): {label_cols}")
-            for row in rows[header_idx + 1:]:
-                if not row or not row[0].strip():
-                    continue
-                raw_date = row[0].split("\n")[0].split("\t")[0].strip()
-                meeting_date = _parse_date(raw_date)
-                if not meeting_date:
-                    continue
-                meeting_date_str = meeting_date.strftime("%Y-%m-%d")
-                for ci, label in label_cols:
-                    if ci >= len(row):
-                        continue
-                    prob = _to_float(row[ci])
-                    if prob is None:
-                        continue
-                    records.append({
-                        "scrape_date":  today,
-                        "meeting_date": meeting_date_str,
-                        "rate_range":   label,
-                        "probability":  prob,
-                    })
-            return records
-
-    # ══ Fallback: خلايا مدمجة (لما مفيش header صريح بـ "MEETING DATE") ════
-    return _try_parse_merged_cells(rows, today)
-
-
-
-# ─── شكل 1: خلايا مدمجة ──────────────────────────────────────────────────────
-def _try_parse_merged_cells(rows: list[list[str]], today: date) -> list[dict]:
-    """
-    يحلّل الحالة اللي بيكون فيها table[1] — كل المعلومات في خلايا كبيرة مدمجة:
-
-    مثال من الـ logs:
-    row[0] = [
-      "MEETING INFORMATION\\nMEETING DATE\\tCONTRACT\\t...\\n29 Apr 2026\\tZQJ6\\t...",
-      "PROBABILITIES\\nEASE\\tNO CHANGE\\tHIKE\\n0.0 %\\t99.5 %\\t0.5 %",
-      ...
-    ]
-
-    الخوارزمية:
-    - نفك كل خلية إلى سطور وكلمات
-    - نبحث عن تواريخ الاجتماعات
-    - نبحث عن الاحتمالات (أرقام + %) بالترتيب: Ease, No Change, Hike
-    - نربط كل تاريخ بالاحتمالات المجاورة له
-    """
-    records = []
-
-    # ── نجمع كل النصوص في list مسطّحة مع تتبع الـ rows ──────────────────────
-    # نبحث عن pattern: تاريخ ثم 3 احتمالات (أو 2) في نفس block
-    for row in rows:
-        meeting_date = None
-        probabilities = []  # قائمة مرتّبة: [ease, no_change, hike]
-
-        # ── نفك كل خلية ونجمع الـ tokens ────────────────────────────────────
-        all_tokens = []
-        for cell in row:
-            if not cell:
+            date_text = cells[0].get_text(strip=True)
+            d         = _parse_date(date_text)
+            if not d:
                 continue
-            # استبدل \t بـ \n عشان نعامل الاثنين زي بعض
-            normalized = cell.replace("\t", "\n")
-            lines = [l.strip() for l in normalized.split("\n") if l.strip()]
-            all_tokens.extend(lines)
+            date_str = d.strftime("%Y-%m-%d")
 
-        # ── دوّر على الـ tokens ───────────────────────────────────────────────
-        i = 0
-        while i < len(all_tokens):
-            token = all_tokens[i]
-
-            # تاريخ؟
-            if meeting_date is None:
-                d = _parse_date(token)
-                if d:
-                    meeting_date = d
-                    i += 1
+            for ci, label in rate_cols:
+                if ci >= len(cells):
                     continue
-
-            # احتمالية (رقم%)؟
-            if "%" in token:
-                val = _to_float(token)
-                if val is not None and len(probabilities) < 3:
-                    probabilities.append(val)
-
-            i += 1
-
-        # ── إذا وجدنا تاريخ واحتمالية واحدة على الأقل ── ────────────────────
-        if meeting_date and probabilities:
-            date_str = meeting_date.strftime("%Y-%m-%d")
-            labels = ["Ease", "No Change", "Hike"]
-            for label, val in zip(labels, probabilities):
+                prob = _to_float(cells[ci].get_text(strip=True))
+                if prob is None:
+                    continue
                 records.append({
                     "scrape_date":  today,
                     "meeting_date": date_str,
                     "rate_range":   label,
-                    "probability":  val,
+                    "probability":  prob,
                 })
-            logger.info(
-                f"   ✅ merged: {date_str} → "
-                + ", ".join(f"{l}={v}" for l, v in zip(labels, probabilities))
-            )
 
+        if records:
+            break  # وجدنا الجدول الصح
+
+    logger.info(f"   Rate ranges records: {len(records)}")
     return records
+
+
+# ─── Step 4b: تحليل Aggregated (Ease/No Change/Hike) كـ Fallback ──────────────
+def _parse_aggregated_html(html: str, today: date) -> list[dict]:
+    """
+    Fallback: يحلّل جدول Aggregated (Ease / No Change / Hike).
+    """
+    html_content = _extract_updatepanel_html(html)
+    soup         = BeautifulSoup(html_content, "html.parser")
+    records      = []
+
+    AGG_LABELS = {
+        "ease":      "Ease",
+        "no change": "No Change",
+        "hike":      "Hike",
+    }
+
+    for tbl in soup.find_all("table"):
+        rows = tbl.find_all("tr")
+        if len(rows) < 2:
+            continue
+
+        header_idx = None
+        agg_cols   = []
+
+        for ri, tr in enumerate(rows):
+            cells      = tr.find_all(["td", "th"])
+            cell_texts = [c.get_text(strip=True) for c in cells]
+
+            has_meeting = any("meeting" in t.lower() for t in cell_texts)
+            agg_found   = [
+                (ci, AGG_LABELS[t.lower()])
+                for ci, t in enumerate(cell_texts)
+                if t.lower() in AGG_LABELS
+            ]
+
+            if has_meeting and agg_found:
+                header_idx = ri
+                agg_cols   = agg_found
+                break
+
+        if header_idx is None:
+            continue
+
+        for tr in rows[header_idx + 1:]:
+            cells     = tr.find_all(["td", "th"])
+            if not cells:
+                continue
+            date_text = cells[0].get_text(strip=True)
+            d         = _parse_date(date_text)
+            if not d:
+                continue
+            date_str = d.strftime("%Y-%m-%d")
+
+            for ci, label in agg_cols:
+                if ci >= len(cells):
+                    continue
+                prob = _to_float(cells[ci].get_text(strip=True))
+                if prob is None:
+                    continue
+                records.append({
+                    "scrape_date":  today,
+                    "meeting_date": date_str,
+                    "rate_range":   label,
+                    "probability":  prob,
+                })
+
+        if records:
+            break
+
+    logger.info(f"   Aggregated records: {len(records)}")
+    return records
+
+
+# ─── استخراج HTML من UpdatePanel delta ────────────────────────────────────────
+def _extract_updatepanel_html(raw: str) -> str:
+    """
+    الـ UpdatePanel بيرجع response بالشكل ده:
+      1234|updatePanel|panelId|<HTML CONTENT>|0|hiddenField|...|
+
+    نستخرج كل الـ HTML من الـ updatePanel sections.
+    لو مش UpdatePanel format نرجع الـ raw كما هو.
+    """
+    # Pattern: NNN|updatePanel|ID|CONTENT|
+    parts = re.findall(
+        r'\d+\|updatePanel\|[^|]+\|(.*?)(?=\d+\|(?:updatePanel|hiddenField|scriptBlock|pageTitle|focus)|$)',
+        raw,
+        re.DOTALL,
+    )
+
+    if parts:
+        combined = "\n".join(parts)
+        logger.info(f"   UpdatePanel delta: {len(parts)} panel(s), {len(combined)} chars")
+        return combined
+
+    # لو مش delta format، رجّع الـ raw مباشرة
+    logger.info(f"   Non-delta response: {len(raw)} chars")
+    return raw
 
 
 # ─── أدوات مساعدة ─────────────────────────────────────────────────────────────
 def _parse_date(text: str) -> date | None:
-    """يحاول تحليل النص كتاريخ بعدة صيغ شائعة."""
     clean = text.strip()
-    # تخطى النصوص الطويلة جداً (مش تاريخ)
-    if len(clean) > 20:
+    if not clean or len(clean) > 20:
         return None
     for fmt in (
-        "%m/%d/%Y",   # 4/29/2026
-        "%d %b %Y",   # 29 Apr 2026
-        "%b %d, %Y",  # Apr 29, 2026
-        "%Y-%m-%d",   # 2026-04-29
-        "%d/%m/%Y",   # 29/04/2026
-        "%d %B %Y",   # 29 April 2026
+        "%m/%d/%Y",
+        "%d %b %Y",
+        "%b %d, %Y",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d %B %Y",
     ):
         try:
             return datetime.strptime(clean, fmt).date()
@@ -579,8 +616,7 @@ def _parse_date(text: str) -> date | None:
 
 
 def _to_float(text: str) -> float | None:
-    """يحوّل النص لرقم عشري بعد إزالة % والمسافات."""
-    clean = text.replace("%", "").strip()
+    clean = str(text).replace("%", "").strip()
     if not clean:
         return None
     try:
@@ -589,8 +625,11 @@ def _to_float(text: str) -> float | None:
         return None
 
 
-# ─── للتشغيل اليدوي ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    
     import argparse
     logging.basicConfig(
         level=logging.INFO,
@@ -598,7 +637,8 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
     parser = argparse.ArgumentParser(description="CME FedWatch Scraper")
-    parser.add_argument("--force", action="store_true", help="إعادة السحب حتى لو تم السحب اليوم")
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+
     success = scrape_cme_fedwatch(force=args.force)
     print("\n" + ("✅ نجح" if success else "❌ فشل"))
