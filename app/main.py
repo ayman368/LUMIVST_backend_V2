@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import stocks, cache, auth, contact, rs, rs_v2, admin, scraper, official_filings, financial_details, prices, technical_screener, financial_metrics, screeners, market_breadth, market_reports, economic_indicators, xbrl_companies, xbrl_financials, xbrl_upload
+from app.api.routes import naaim as naaim_router
 
 # ... (Previous code)
 
@@ -23,21 +24,7 @@ try:
 except Exception:
     logging.basicConfig(level=logging.INFO)
 
-SENTRY_DSN = os.getenv("SENTRY_DSN")
-if SENTRY_DSN:
-    try:
-        import sentry_sdk
-        from sentry_sdk.integrations.fastapi import FastApiIntegration
-        from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
 
-        sentry_sdk.init(
-            dsn=SENTRY_DSN,
-            environment=settings.ENVIRONMENT,
-            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
-            integrations=[FastApiIntegration(), SqlalchemyIntegration()],
-        )
-    except Exception:
-        logging.getLogger(__name__).exception("Failed to initialize Sentry")
 
 try:
     from opentelemetry import trace
@@ -141,6 +128,7 @@ app.include_router(financial_metrics.router, prefix="/api/financial-metrics", ta
 app.include_router(market_breadth.router, prefix="/api")  # /api/market-breadth/*
 app.include_router(market_reports.router, prefix="/api/market-reports", tags=["Market Reports"])
 app.include_router(economic_indicators.router, prefix="/api/economic-indicators", tags=["Economic Indicators"])
+app.include_router(naaim_router.router, prefix="/api/naaim", tags=["NAAIM Exposure Index"])
 app.include_router(xbrl_companies.router, dependencies=protected_dependencies)
 app.include_router(xbrl_financials.router, dependencies=protected_dependencies)
 app.include_router(xbrl_upload.router, dependencies=protected_dependencies)

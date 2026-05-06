@@ -1,0 +1,61 @@
+2026-05-05 14:51:10 [INFO] ============================================================
+2026-05-05 14:51:10 [INFO] 🚀 Eurodollar Futures Scraper v2 — Investing.com
+2026-05-05 14:51:10 [INFO]    الطريقة: auto | 2026-05-05
+2026-05-05 14:51:10 [INFO] ============================================================
+2026-05-05 14:51:10 [INFO] 
+────────────────────────────────────────
+  جاري تجربة: api
+2026-05-05 14:51:10 [INFO] 🔌 جاري الجلب عبر Investing.com API…
+2026-05-05 14:51:16 [INFO]   API [404]: https://api.investing.com/api/financialdata/assets/pairsByCategories?category=eu…
+2026-05-05 14:51:16 [INFO]   API [404]: https://api.investing.com/api/financialdata/assets/earningsByCategoryId?category…
+2026-05-05 14:51:16 [INFO]   API [200]: https://api.investing.com/api/search/v2/search?q=eurodollar+futures&tab=futures&…
+2026-05-05 14:51:16 [WARNING]   ⚠️  فشلت أو بيانات غير كافية: api
+2026-05-05 14:51:16 [INFO] 
+────────────────────────────────────────
+  جاري تجربة: html
+2026-05-05 14:51:16 [WARNING]   ⚠️  html رمى exception: No module named 'cloudscraper'
+2026-05-05 14:51:16 [WARNING]   ⚠️  فشلت أو بيانات غير كافية: html
+2026-05-05 14:51:16 [INFO] 
+────────────────────────────────────────
+  جاري تجربة: selenium
+2026-05-05 14:51:16 [INFO] 🤖 Selenium (headless)…
+2026-05-05 14:51:17 [INFO]   جاري استخدام selenium-manager (بدون undetected_chromedriver)…
+2026-05-05 14:52:54 [INFO]   ✅ HTML مجلوب: 382,306 حرف
+2026-05-05 14:52:55 [ERROR]   ❌ Selenium scrape فشل: Couldn't find a tree builder with the features you requested: lxml. Do you need to install a parser library?
+2026-05-05 14:52:57 [WARNING]   ⚠️  فشلت أو بيانات غير كافية: selenium
+2026-05-05 14:52:57 [ERROR] ❌ فشل السحب من جميع الطرق!
+2026-05-05 14:54:56 [INFO] ============================================================
+2026-05-05 14:54:56 [INFO] 🚀 Eurodollar Futures Scraper v2 — Investing.com
+2026-05-05 14:54:56 [INFO]    الطريقة: auto | 2026-05-05
+2026-05-05 14:54:56 [INFO] ============================================================
+2026-05-05 14:54:56 [INFO] 
+────────────────────────────────────────
+  جاري تجربة: api
+2026-05-05 14:54:56 [INFO] 🔌 جاري الجلب عبر Investing.com API…
+2026-05-05 14:55:02 [INFO]   API [404]: https://api.investing.com/api/financialdata/assets/pairsByCategories?category=eu…
+2026-05-05 14:55:02 [INFO]   API [404]: https://api.investing.com/api/financialdata/assets/earningsByCategoryId?category…
+2026-05-05 14:55:02 [INFO]   API [200]: https://api.investing.com/api/search/v2/search?q=eurodollar+futures&tab=futures&…
+2026-05-05 14:55:02 [WARNING]   ⚠️  فشلت أو بيانات غير كافية: api
+2026-05-05 14:55:02 [INFO] 
+────────────────────────────────────────
+  جاري تجربة: html
+2026-05-05 14:55:02 [INFO]   محاولة HTML عبر cloudscraper…
+2026-05-05 14:55:03 [WARNING]     cloudscraper فشل: ('Connection aborted.', ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None))
+2026-05-05 14:55:03 [WARNING]   ⚠️  cloudscraper: HTML قصير جداً (0 حرف) — الصفحة تُعرض بـ JS
+2026-05-05 14:55:03 [INFO]   محاولة HTML عبر requests…
+2026-05-05 14:55:05 [INFO]     HTTP 200 | 225,571 حرف
+2026-05-05 14:55:06 [INFO]     📊 27 عقد مستخرج
+2026-05-05 14:55:06 [INFO]   ✅ نجحت: html (27 عقد)
+2026-05-05 14:55:06 [INFO] 
+✅ تم سحب 27 عقد بنجاح!
+2026-05-05 14:55:06 [INFO] 💾 CSV محفوظ: eurodollar_2026-05-05.csv (27 صف)
+2026-05-05 14:59:47 [INFO] ============================================================
+2026-05-05 14:59:47 [INFO] 🚀 Eurodollar Futures Scraper [Cleaned v3]
+2026-05-05 14:59:47 [INFO]    التاريخ: 2026-05-05
+2026-05-05 14:59:47 [INFO] ============================================================
+2026-05-05 14:59:47 [INFO]   محاولة جلب HTML عبر requests…
+2026-05-05 14:59:51 [INFO]     HTTP 200 | 226,158 حرف
+2026-05-05 14:59:51 [INFO]     📊 27 عقد مستخرج
+2026-05-05 14:59:51 [INFO] 
+✅ تم سحب 27 عقد بنجاح!
+2026-05-05 14:59:51 [INFO] 💾 CSV محفوظ: eurodollar_2026-05-05.csv (27 صف)

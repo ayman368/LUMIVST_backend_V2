@@ -72,7 +72,6 @@ xlrd
 
 boto3
 python-json-logger
-sentry-sdk
 opentelemetry-api
 opentelemetry-sdk
 

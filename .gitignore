@@ -16,3 +16,6 @@ data/downloads/
 storage/excel_reports/
 scraped_data/
 parameters_analysis/
+.pytest_cache/
+.coverage
+htmlcov/

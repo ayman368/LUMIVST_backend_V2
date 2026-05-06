@@ -18,6 +18,14 @@ class IndustryGroupBase(BaseModel):
     rank_3_months_ago: Optional[int]
     rank_6_months_ago: Optional[int]
     ytd_change_percent: Optional[float]
+    percent_above_ma20: Optional[float] = None
+    percent_above_ma50: Optional[float] = None
+    percent_above_ma150: Optional[float] = None
+    percent_above_ma200: Optional[float] = None
+    count_above_ma20: Optional[int] = None
+    count_above_ma50: Optional[int] = None
+    count_above_ma150: Optional[int] = None
+    count_above_ma200: Optional[int] = None
 
 class IndustryGroupResponse(IndustryGroupBase):
     id: int

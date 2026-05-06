@@ -62,36 +62,23 @@ def run_calculations_only(target_date_str=None):
         # PHASE 2: RS CALCULATION
         # =====================================================================
         logger.info("\n" + "=" * 70)
-        logger.info("PHASE 2/5: RS CALCULATION")
+        logger.info("PHASE 2/6: RS CALCULATION (In Memory)")
         logger.info("=" * 70)
         
         try:
-            # Delete old RS records for this date FIRST
-            logger.info(f"🧹 Deleting old RS records for {market_date}...")
-            delete_rs = text("DELETE FROM rs_daily_v2 WHERE date = :target_date")
-            db.execute(delete_rs, {"target_date": market_date})
-            db.commit()
-            logger.info(f"✅ Deleted old RS records")
-            
-            # Now calculate new ones
             from scripts.calculate_rs_final_precise import RSCalculatorUltraFast
+            import pandas as pd
             
             logger.info("🧮 Calculating RS (Vectorized)...")
             calculator = RSCalculatorUltraFast(str(settings.DATABASE_URL))
-            df_all_results = calculator.calculate_full_history_optimized()
+            results = calculator.calculate_daily_rs_ultrafast(market_date)
+            df_rs_today = None
             
-            if df_all_results is not None and not df_all_results.empty:
-                df_all_results['date'] = pd.to_datetime(df_all_results['date']).dt.date
-                df_today = df_all_results[df_all_results['date'] == market_date]
-                
-                if not df_today.empty:
-                    logger.info(f"💾 Saving {len(df_today)} RS records...")
-                    calculator.save_bulk_results(df_today)
-                    logger.info(f"✅ RS Calculation Complete ({len(df_today)} records)")
-                else:
-                    logger.warning(f"⚠️ No RS results for {market_date}")
+            if results and len(results) > 0:
+                df_rs_today = pd.DataFrame(results)
+                logger.info(f"✅ Calculated RS for {len(df_rs_today)} stocks (held in memory).")
             else:
-                logger.error("❌ RS calculation returned no results")
+                logger.warning(f"⚠️ No RS results for {market_date}")
                 
         except Exception as e:
             logger.error(f"❌ RS Calculation Error: {e}")
@@ -102,21 +89,18 @@ def run_calculations_only(target_date_str=None):
         # PHASE 3: TECHNICAL INDICATORS
         # =====================================================================
         logger.info("\n" + "=" * 70)
-        logger.info("PHASE 3/5: TECHNICAL INDICATORS")
+        logger.info("PHASE 3/6: TECHNICAL INDICATORS")
         logger.info("=" * 70)
         
         try:
             from scripts.calculate_technicals import TechnicalCalculator
             
-            logger.info("🧹 Clearing old technical calculations for this date...")
-            # Note: TechnicalCalculator saves to prices table, so records are updated
-            
             logger.info("🧮 Calculating Technical Indicators (SMA, EMA, 52W, etc)...")
             tech_calc = TechnicalCalculator(str(settings.DATABASE_URL))
             df_tech = tech_calc.load_data()
             df_tech_res = tech_calc.calculate(df_tech)
-            tech_calc.save_latest(df_tech_res)
-            logger.info("✅ Technical Indicators Complete")
+            tech_map = tech_calc.save_change_only_and_return_tech_map(df_tech_res)
+            logger.info(f"✅ Technical Indicators Complete (held in memory: {len(tech_map)} stocks).")
             
         except Exception as e:
             logger.error(f"❌ Technical Indicators Error: {e}")
@@ -127,7 +111,7 @@ def run_calculations_only(target_date_str=None):
         # PHASE 4: IBD METRICS (RS Ratings & Acc/Dis)
         # =====================================================================
         logger.info("\n" + "=" * 70)
-        logger.info("PHASE 4/5: IBD METRICS (Group RS, Acc/Dis)")
+        logger.info("PHASE 4/6: IBD METRICS (Group RS, Acc/Dis)")
         logger.info("=" * 70)
         
         try:
@@ -137,15 +121,13 @@ def run_calculations_only(target_date_str=None):
             ibd_calc = IBDMetricsCalculator(db)
             df_ibd_prices = ibd_calc.load_data(lookback_days=230)
             
+            group_rs_map = {}
+            acc_dis_map = {}
+            
             if not df_ibd_prices.empty:
-                group_rs_map = ibd_calc.calculate_group_rs(df_ibd_prices, market_date)
-                acc_dis_map = ibd_calc.calculate_acc_dis(df_ibd_prices, market_date)
-                
-                if group_rs_map or acc_dis_map:
-                    ibd_calc.save_results(group_rs_map, acc_dis_map, market_date)
-                    logger.info(f"✅ IBD Metrics Complete")
-                else:
-                    logger.warning("⚠️ No IBD results generated")
+                group_rs_map = ibd_calc.calculate_group_rs(df_ibd_prices, market_date) or {}
+                acc_dis_map = ibd_calc.calculate_acc_dis(df_ibd_prices, market_date) or {}
+                logger.info(f"✅ Calculated IBD Metrics: {len(group_rs_map)} group RS, {len(acc_dis_map)} Acc/Dis.")
             else:
                 logger.warning("⚠️ No price data for IBD calculation")
                 
@@ -154,6 +136,36 @@ def run_calculations_only(target_date_str=None):
             import traceback
             traceback.print_exc()
             return False
+            
+        # PHASE 4.5: MERGE RS & IBD AND SAVE ATOMICALLY
+        # =====================================================================
+        logger.info("\n" + "=" * 70)
+        logger.info("PHASE 4.5/6: MERGE RS + IBD AND SAVE")
+        logger.info("=" * 70)
+        try:
+            if df_rs_today is not None and not df_rs_today.empty:
+                logger.info("💾 Merging RS + IBD data and saving atomically to rs_daily_v2...")
+                
+                for idx, row in df_rs_today.iterrows():
+                    sym = row.get('symbol')
+                    if sym:
+                        grp = group_rs_map.get(sym, {})
+                        df_rs_today.at[idx, 'sector_rs_rating'] = grp.get('sector_rs_rating')
+                        df_rs_today.at[idx, 'industry_group_rs_rating'] = grp.get('industry_group_rs_rating')
+                        df_rs_today.at[idx, 'industry_rs_rating'] = grp.get('industry_rs_rating')
+                        df_rs_today.at[idx, 'sub_industry_rs_rating'] = grp.get('sub_industry_rs_rating')
+                        df_rs_today.at[idx, 'acc_dis_rating'] = acc_dis_map.get(sym)
+                
+                calculator.save_bulk_results_with_ibd(df_rs_today)
+                logger.info(f"✅ RS + IBD Data saved atomically for {market_date} ({len(df_rs_today)} stocks).")
+            else:
+                logger.warning("⚠️ No RS dataframe to merge and save.")
+        except Exception as e:
+            logger.error(f"❌ Merging RS/IBD Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
         
         # PHASE 5: INDUSTRY GROUP METRICS
         # =====================================================================
@@ -201,28 +213,54 @@ def run_calculations_only(target_date_str=None):
         # PHASE 6: STOCK TECHNICAL INDICATORS
         # =====================================================================
         logger.info("\n" + "=" * 70)
-        logger.info("PHASE 6/6: STOCK TECHNICAL INDICATORS")
+        logger.info("PHASE 6/6: STOCK TECHNICAL INDICATORS & MARKET BREADTH")
         logger.info("=" * 70)
         
         try:
             from scripts.calculate_stock_indicators import calculate_and_store_indicators
             
-            from scripts.calculate_stock_indicators import calculate_and_store_indicators
-            
-            # NOTE: We no longer delete old stock_indicator records here because 
-            # Phase 3 (TechnicalCalculator) just updated them with market stats.
-            # calculate_and_store_indicators uses UPSERT and will only update its specific fields.
-
-            
             logger.info("🧮 Calculating and storing Stock Technical Indicators...")
-            processed, errors, successful = calculate_and_store_indicators(db, market_date)
+            processed, errors, successful = calculate_and_store_indicators(db, market_date, tech_map=tech_map)
             logger.info(f"✅ Stock Indicators Complete (Processed: {processed}, Successful: {successful}, Errors: {errors})")
             
+            # Calculate Daily Market Breadth
+            logger.info("🧮 Calculating Market Breadth...")
+            from scripts.update_daily_market_breadth import update_todays_market_breadth
+            update_todays_market_breadth(db, market_date)
+            logger.info("✅ Market Breadth Updated")
+            
         except Exception as e:
-            logger.error(f"❌ Stock Indicators Error: {e}")
+            logger.error(f"❌ Stock Indicators / Market Breadth Error: {e}")
             import traceback
             traceback.print_exc()
             return False
+            
+        # 6.5 Update Status (عشان الموقع يقرأ التاريخ الجديد)
+        # -------------------------------------------------------------------
+        try:
+            db.execute(text("""
+                UPDATE update_status 
+                SET latest_ready_date = :market_date, 
+                    is_updating = FALSE, 
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """), {"market_date": market_date})
+            db.commit()
+            logger.info(f"✅ Update Status updated to {market_date}")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to update update_status: {e}")
+            db.rollback()
+            
+
+        # 7. Invalidate Caches so new data shows up immediately
+        # -------------------------------------------------------------------
+        try:
+            import asyncio
+            from app.core.cache_helpers import invalidate_all_caches
+            asyncio.run(invalidate_all_caches())
+            logger.info("🧹 Application caches cleared successfully. New data is now live.")
+        except Exception as cache_err:
+            logger.warning(f"⚠️ Failed to invalidate caches: {cache_err}")
         
         logger.info("\n" + "=" * 70)
         logger.info("🎉 ALL CALCULATIONS COMPLETED SUCCESSFULLY!")

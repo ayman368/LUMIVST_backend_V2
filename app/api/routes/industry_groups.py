@@ -42,7 +42,70 @@ async def get_latest_industry_groups(
             IndustryGroupHistory.rank.asc().nullslast()
         ).all()
         
-        return groups
+        # Calculate Market Breadth dynamically
+        from app.models.price import Price
+        from app.models.stock_indicators import StockIndicator
+        price_latest_date = db.query(func.max(Price.date)).scalar()
+        
+        breadth_dict = {}
+        if price_latest_date:
+            records = db.query(
+                Price.industry_group,
+                StockIndicator.close,
+                StockIndicator.sma_20,
+                StockIndicator.sma_50,
+                StockIndicator.sma_150,
+                StockIndicator.sma_200
+            ).join(
+                StockIndicator,
+                (Price.symbol == StockIndicator.symbol) & (StockIndicator.date == price_latest_date)
+            ).filter(
+                Price.date == price_latest_date
+            ).all()
+            
+            for row in records:
+                ig = row.industry_group
+                if not ig:
+                    continue
+                if ig not in breadth_dict:
+                    breadth_dict[ig] = {'total': 0, 'ma20': 0, 'ma50': 0, 'ma150': 0, 'ma200': 0}
+                
+                c = row.close
+                breadth_dict[ig]['total'] += 1
+                if c is not None and row.sma_20 is not None and c > row.sma_20:
+                    breadth_dict[ig]['ma20'] += 1
+                if c is not None and row.sma_50 is not None and c > row.sma_50:
+                    breadth_dict[ig]['ma50'] += 1
+                if c is not None and row.sma_150 is not None and c > row.sma_150:
+                    breadth_dict[ig]['ma150'] += 1
+                if c is not None and row.sma_200 is not None and c > row.sma_200:
+                    breadth_dict[ig]['ma200'] += 1
+                    
+        result = []
+        for g in groups:
+            g_dict = {c.name: getattr(g, c.name) for c in g.__table__.columns}
+            if g.industry_group in breadth_dict and breadth_dict[g.industry_group]['total'] > 0:
+                b = breadth_dict[g.industry_group]
+                g_dict['percent_above_ma20'] = round((b['ma20'] / b['total']) * 100, 2)
+                g_dict['percent_above_ma50'] = round((b['ma50'] / b['total']) * 100, 2)
+                g_dict['percent_above_ma150'] = round((b['ma150'] / b['total']) * 100, 2)
+                g_dict['percent_above_ma200'] = round((b['ma200'] / b['total']) * 100, 2)
+                g_dict['count_above_ma20'] = b['ma20']
+                g_dict['count_above_ma50'] = b['ma50']
+                g_dict['count_above_ma150'] = b['ma150']
+                g_dict['count_above_ma200'] = b['ma200']
+            else:
+                g_dict['percent_above_ma20'] = None
+                g_dict['percent_above_ma50'] = None
+                g_dict['percent_above_ma150'] = None
+                g_dict['percent_above_ma200'] = None
+                g_dict['count_above_ma20'] = None
+                g_dict['count_above_ma50'] = None
+                g_dict['count_above_ma150'] = None
+                g_dict['count_above_ma200'] = None
+            result.append(g_dict)
+            
+        return result
         
     return await cache_read_through(cache_key, CACHE_TTL_INDUSTRY_GROUPS_LATEST, fetch_latest)
 
@@ -58,14 +121,14 @@ from app.models.rs_daily import RSDaily
 
 @router.get("/stocks", response_model=List[IndustryGroupStockResponse])
 async def get_industry_group_stocks(
-    industry_group: str = Query(..., description="Name of the industry group"),
+    industry_group: Optional[str] = Query(None, description="Name of the industry group (optional, if omitted returns all stocks)"),
     db: Session = Depends(get_db)
 ):
     """
     Get all stocks belonging to a specific Industry Group for the latest available date,
     including historical RS ratings.
     """
-    cache_key = make_industry_groups_stocks_key(industry_group)
+    cache_key = make_industry_groups_stocks_key(industry_group or 'ALL_STOCKS')
     
     async def fetch_stocks():
         # 1. Find the latest date in Prices
@@ -75,10 +138,10 @@ async def get_industry_group_stocks(
             return []
 
         # 2. Query stocks
-        stocks = db.query(Price).filter(
-            Price.date == latest_date,
-            Price.industry_group == industry_group
-        ).order_by(Price.symbol).all()
+        query = db.query(Price).filter(Price.date == latest_date)
+        if industry_group:
+            query = query.filter(Price.industry_group == industry_group)
+        stocks = query.order_by(Price.symbol).all()
         
         if not stocks:
             return []

@@ -166,7 +166,7 @@ def trigger_scrape_eurodollar(_: bool = Depends(verify_internal_key)):
     
     def scrape_with_error_handling():
         try:
-            scrape_eurodollar_futures()
+            scrape_eurodollar_futures(save_db=True, force=True)
             logger.info("Eurodollar futures scraping completed successfully")
         except Exception as e:
             logger.error(f"Eurodollar futures scraping failed: {e}")
@@ -198,7 +198,7 @@ def trigger_scrape_cmefedwatch(_: bool = Depends(verify_internal_key)):
     
     def scrape_with_error_handling():
         try:
-            scrape_cme_fedwatch()
+            scrape_cme_fedwatch(save_db=True, force=True)
             logger.info("CME FedWatch scraping completed successfully")
         except Exception as e:
             logger.error(f"CME FedWatch scraping failed: {e}")

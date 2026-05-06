@@ -17,3 +17,4 @@ from app.models.market_reports import (
     ShareBuyback,
     SBLPosition,
 )
+from app.models.naaim_exposure import NaaimExposure

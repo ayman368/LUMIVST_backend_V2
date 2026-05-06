@@ -26,6 +26,7 @@ from app.models.price import Price
 from app.models.rs_daily import RSDaily
 from app.models.official_filings import CompanyOfficialFiling
 from app.models.economic_indicators import EconomicIndicator
+from app.models.naaim_exposure import NaaimExposure
 
 def create_tables():
     """إنشاء الجداول"""

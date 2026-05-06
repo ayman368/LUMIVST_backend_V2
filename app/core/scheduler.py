@@ -61,6 +61,33 @@ def job_weekly_scrapers():
     logger.info("📆 [Scheduler] WEEKLY scrapers finished.")
 
 
+# ─── Job: Weekly NAAIM (Thursday) ─────────────────────────────
+def job_naaim_scraper():
+    """NAAIM Exposure Index is published every Thursday."""
+    logger.info("📆 [Scheduler] NAAIM scraper starting…")
+    _safe("NAAIM", lambda: __import__(
+        "app.scrapers.naaim_scraper", fromlist=["scrape_naaim"]
+    ).scrape_naaim(mode="incremental"))
+    _clear_naaim_cache()
+    _clear_cache()
+    logger.info("📆 [Scheduler] NAAIM scraper finished.")
+
+
+def _clear_naaim_cache():
+    """Clear NAAIM-specific cache keys (sync)."""
+    try:
+        import redis as sync_redis
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        r = sync_redis.from_url(redis_url, decode_responses=True, socket_timeout=5)
+        keys = r.keys("naaim:*")
+        if keys:
+            r.delete(*keys)
+        logger.info(f"  🗑️ Cleared {len(keys)} NAAIM cache keys")
+        r.close()
+    except Exception as e:
+        logger.warning(f"  ⚠️ NAAIM cache clear skipped: {e}")
+
+
 # ─── Job: Monthly ─────────────────────────────────────────────
 def job_monthly_scrapers():
     logger.info("🗓️ [Scheduler] MONTHLY scrapers starting…")
@@ -152,6 +179,11 @@ def start_scheduler():
         job_monthly_scrapers,
         CronTrigger(day=10, hour=2, minute=0, timezone=EGYPT_TZ),
         id="monthly", name="Monthly Scrapers", replace_existing=True,
+    )
+    _scheduler.add_job(
+        job_naaim_scraper,
+        CronTrigger(day_of_week="thu", hour=1, minute=45, timezone=EGYPT_TZ),
+        id="naaim_weekly", name="Weekly NAAIM Exposure Index", replace_existing=True,
     )
 
     _scheduler.start()

@@ -256,3 +256,140 @@ def get_company_reports(symbol: str, db: Session = Depends(get_db)):
             grouped[r.category.value].append(item)
             
     return grouped
+
+
+# ═══════════════════════════════════════════════════════
+# ══  Admin Endpoints for Reports Management Dashboard ══
+# ═══════════════════════════════════════════════════════
+
+from sqlalchemy import func as sql_func, distinct
+
+@router.get("/reports/admin/summary")
+def get_admin_reports_summary(db: Session = Depends(get_db)):
+    """
+    Returns a summary of all companies with filing counts, grouped by language.
+    Used by the Admin Reports Management dashboard.
+    """
+    # Subquery: count filings per symbol, language
+    results = (
+        db.query(
+            CompanyOfficialFiling.company_symbol,
+            CompanyOfficialFiling.language,
+            sql_func.count(CompanyOfficialFiling.id).label("count"),
+            sql_func.max(CompanyOfficialFiling.created_at).label("last_updated"),
+        )
+        .group_by(CompanyOfficialFiling.company_symbol, CompanyOfficialFiling.language)
+        .order_by(CompanyOfficialFiling.company_symbol)
+        .all()
+    )
+
+    # Build structured response
+    companies: Dict[str, Any] = {}
+    for row in results:
+        sym = row.company_symbol
+        if sym not in companies:
+            companies[sym] = {
+                "symbol": sym,
+                "en_count": 0,
+                "ar_count": 0,
+                "total_count": 0,
+                "last_updated": None,
+            }
+        lang_val = row.language.value if hasattr(row.language, 'value') else str(row.language)
+        if lang_val == 'en':
+            companies[sym]["en_count"] = row.count
+        else:
+            companies[sym]["ar_count"] = row.count
+        companies[sym]["total_count"] += row.count
+
+        # Track the most recent update
+        if row.last_updated:
+            ts = row.last_updated.isoformat() if row.last_updated else None
+            if companies[sym]["last_updated"] is None or (ts and ts > companies[sym]["last_updated"]):
+                companies[sym]["last_updated"] = ts
+
+    return {
+        "total_companies": len(companies),
+        "total_filings": sum(c["total_count"] for c in companies.values()),
+        "companies": list(companies.values()),
+    }
+
+
+@router.get("/reports/admin/{symbol}/details")
+def get_admin_company_details(symbol: str, db: Session = Depends(get_db)):
+    """
+    Returns detailed filing records for a specific company symbol.
+    """
+    filings = (
+        db.query(CompanyOfficialFiling)
+        .filter(CompanyOfficialFiling.company_symbol == symbol)
+        .order_by(CompanyOfficialFiling.year.desc(), CompanyOfficialFiling.category, CompanyOfficialFiling.period)
+        .all()
+    )
+
+    items = []
+    for f in filings:
+        items.append({
+            "id": f.id,
+            "category": f.category.value,
+            "period": f.period.value,
+            "year": f.year,
+            "file_url": f.file_url,
+            "source_url": f.source_url,
+            "file_type": f.file_type.value if f.file_type else None,
+            "language": f.language.value if f.language else 'en',
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        })
+
+    return {
+        "symbol": symbol,
+        "total": len(items),
+        "filings": items,
+    }
+
+
+@router.delete("/reports/admin/{symbol}/{filing_id}")
+def delete_single_filing(symbol: str, filing_id: int, db: Session = Depends(get_db)):
+    """
+    Delete a single filing record from DB (and its R2 file).
+    """
+    filing = (
+        db.query(CompanyOfficialFiling)
+        .filter(CompanyOfficialFiling.id == filing_id, CompanyOfficialFiling.company_symbol == symbol)
+        .first()
+    )
+    if not filing:
+        raise HTTPException(status_code=404, detail="Filing not found")
+
+    # Try to delete from R2
+    try:
+        if filing.file_url:
+            # Extract the S3 key from the public URL
+            # e.g. https://pub-xxx.r2.dev/4322/2024/en/Annual_Financial_Statements.pdf → 4322/2024/en/Annual_Financial_Statements.pdf
+            url = filing.file_url
+            # Find the key after the domain
+            parts = url.split("/")
+            # The key is everything after the domain (3rd slash onwards)
+            if len(parts) > 3:
+                s3_key = "/".join(parts[3:])
+                import boto3
+                s3_endpoint = os.getenv("S3_ENDPOINT")
+                s3_access = os.getenv("S3_ACCESS_KEY")
+                s3_secret = os.getenv("S3_SECRET_KEY")
+                s3_bucket = os.getenv("S3_BUCKET_NAME")
+                if s3_endpoint and s3_access and s3_secret and s3_bucket:
+                    s3 = boto3.client('s3',
+                        endpoint_url=s3_endpoint,
+                        aws_access_key_id=s3_access,
+                        aws_secret_access_key=s3_secret
+                    )
+                    s3.delete_object(Bucket=s3_bucket, Key=s3_key)
+                    print(f"🗑️ Deleted R2 object: {s3_key}")
+    except Exception as e:
+        print(f"⚠️ R2 delete failed (non-critical): {e}")
+
+    # Delete DB record
+    db.delete(filing)
+    db.commit()
+
+    return {"message": f"Filing {filing_id} deleted for {symbol}"}

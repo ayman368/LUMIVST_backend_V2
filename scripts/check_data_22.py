@@ -19,11 +19,11 @@ from app.core.database import SessionLocal
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TARGET_DATE = date(2026, 4, 22)
+TARGET_DATE = date(2026, 4, 29)
 
 def check_data():
     """
-    التحقق من عدد السجلات في كل جدول لتاريخ 22-04-2026
+    التحقق من عدد السجلات في كل جدول لتاريخ 29-04-2026
     """
     db = SessionLocal()
     
@@ -94,7 +94,7 @@ def check_data():
         """)
         
         if total == 0:
-            logger.warning("⚠️  لا توجد بيانات لحذفها في تاريخ 22-04-2026")
+            logger.warning("⚠️  لا توجد بيانات لحذفها في تاريخ 29-04-2026")
         else:
             logger.info(f"✅ جاهز للحذف! سيتم حذف {total} سجل")
 

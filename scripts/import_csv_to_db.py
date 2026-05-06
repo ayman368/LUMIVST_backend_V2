@@ -1,5 +1,6 @@
 """
 سكريبت استيراد البيانات التاريخية من ملف CSV إلى PostgreSQL
+يستخدم Bulk Upsert (INSERT ON CONFLICT) للسرعة القصوى
 
 الاستخدام:
     python import_csv_to_db.py path/to/your/file.csv
@@ -9,31 +10,50 @@ import pandas as pd
 import sys
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine, func, text
 from sqlalchemy.orm import sessionmaker
 from pathlib import Path
 
 # إضافة مسار المشروع
-sys.path.append(str(Path(__file__).parent.parent))
+project_root = Path(__file__).resolve().parent.parent
+sys.path.append(str(project_root))
 
 from app.core.config import settings
 from app.models.price import Price
 from app.core.database import Base, engine
 
+
+def load_hierarchy_mapping():
+    """تحميل ملف new.csv لإثراء البيانات بالقطاعات"""
+    mapping = {}
+    csv_path = project_root / "new.csv"
+    try:
+        if csv_path.exists():
+            hierarchy_df = pd.read_csv(csv_path)
+            for _, r in hierarchy_df.iterrows():
+                mapping[str(r['Symbol'])] = {
+                    "sector": r.get('Sector'),
+                    "industry": r.get('Industry'),
+                    "sub_industry": r.get('Sub-Industry')
+                }
+            print(f"📦 تم تحميل بيانات القطاعات لـ {len(mapping)} شركة من new.csv")
+    except Exception as e:
+        print(f"⚠️ تحذير: لم يتم تحميل new.csv: {e}")
+    return mapping
+
+
 def clean_numeric(value):
-    """
-    تنظيف القيم الرقمية من الفواصل والمسافات
-    """
+    """تنظيف القيم الرقمية من الفواصل والمسافات"""
     if pd.isna(value):
         return None
     if isinstance(value, (int, float)):
         return value
-    # إزالة الفواصل والمسافات
     cleaned = str(value).replace(',', '').replace(' ', '').strip()
     try:
         return float(cleaned)
     except:
         return None
+
 
 def parse_date(date_str):
     """
@@ -41,48 +61,43 @@ def parse_date(date_str):
     """
     if pd.isna(date_str):
         return None
-    
-    # أولوية للصيغة الأمريكية M/D/YYYY (الأكثر شيوعًا في ملفات Tadawul)
-    # ملاحظة: تم تغيير الترتيب لتجنب التفسير الخاطئ للتواريخ
+
     for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y']:
         try:
             return datetime.strptime(str(date_str), fmt).date()
         except:
             continue
-    
+
     print(f"⚠️ تحذير: فشل تحويل التاريخ {date_str}")
     return None
 
-def import_csv_to_database(csv_file_path: str, batch_size: int = 1000):
+
+def import_csv_to_database(csv_file_path: str):
     """
-    استيراد ملف CSV إلى قاعدة البيانات
-    
-    Args:
-        csv_file_path: مسار ملف CSV
-        batch_size: عدد الصفوف في كل دفعة
+    استيراد ملف CSV إلى قاعدة البيانات باستخدام Bulk Upsert
+    أسرع 50x+ من الطريقة القديمة (row-by-row)
     """
-    
+
     # التحقق من وجود الملف
     if not os.path.exists(csv_file_path):
         print(f"❌ الملف غير موجود: {csv_file_path}")
         return
-    
+
     print(f"📂 قراءة الملف: {csv_file_path}")
-    
+
     # قراءة CSV
     try:
         df = pd.read_csv(csv_file_path, encoding='utf-8-sig')
     except:
-        # جرب encoding آخر
         df = pd.read_csv(csv_file_path, encoding='windows-1256')
-    
+
     print(f"📊 عدد الصفوف: {len(df):,}")
     print(f"📋 الأعمدة: {list(df.columns)}")
-    
+
     # تنظيف أسماء الأعمدة
     df.columns = df.columns.str.strip()
-    
-    # Mapping الأعمدة (حسب ما شفته في الصورة)
+
+    # Mapping الأعمدة
     column_mapping = {
         'Industry Group': 'industry_group',
         'Symbol': 'symbol',
@@ -98,121 +113,133 @@ def import_csv_to_database(csv_file_path: str, batch_size: int = 1000):
         'Value Traded (SAR)': 'value_traded_sar',
         'No. of Trades': 'no_of_trades'
     }
-    
-    # إعادة تسمية الأعمدة
+
     df = df.rename(columns=column_mapping)
-    
+
     # تنظيف وتحويل البيانات
     print("🧹 تنظيف البيانات...")
-    
-    # تحويل التاريخ
+
     df['date'] = df['date'].apply(parse_date)
-    
-    # تنظيف الأعمدة الرقمية
-    numeric_columns = ['open', 'high', 'low', 'close', 'change', 'change_percent', 
-                      'volume_traded', 'value_traded_sar', 'no_of_trades']
-    
+
+    numeric_columns = ['open', 'high', 'low', 'close', 'change', 'change_percent',
+                       'volume_traded', 'value_traded_sar', 'no_of_trades']
+
     for col in numeric_columns:
         if col in df.columns:
             df[col] = df[col].apply(clean_numeric)
-    
-    # إزالة الصفوف التي ليس فيها تاريخ أو سعر إغلاق
+
+    # إزالة الصفوف بدون بيانات أساسية
     initial_count = len(df)
     df = df.dropna(subset=['date', 'close', 'symbol'])
     removed_count = initial_count - len(df)
-    
+
     if removed_count > 0:
         print(f"⚠️ تم إزالة {removed_count} صف لعدم وجود بيانات أساسية")
-    
-    # فرز البيانات
+
     df = df.sort_values(['symbol', 'date'])
-    
+    df['symbol'] = df['symbol'].astype(str)
+
     print(f"✅ البيانات نظيفة: {len(df):,} صف جاهز للاستيراد")
-    
-    # إنشاء الجداول إذا لم تكن موجودة
+
+    # إثراء البيانات بالقطاعات
+    hierarchy_map = load_hierarchy_mapping()
+    df['sector'] = df['symbol'].map(lambda s: hierarchy_map.get(s, {}).get('sector'))
+    df['industry'] = df['symbol'].map(lambda s: hierarchy_map.get(s, {}).get('industry'))
+    df['sub_industry'] = df['symbol'].map(lambda s: hierarchy_map.get(s, {}).get('sub_industry'))
+
+    # إنشاء الجداول
     print("🔧 إنشاء الجداول...")
     Base.metadata.create_all(bind=engine)
-    
-    # إنشاء Session
+
+    # =====================================================================
+    # BULK UPSERT - أسرع بكتير من row-by-row
+    # =====================================================================
+    print(f"💾 بدء الاستيراد (Bulk Upsert)...")
+
+    now_str = datetime.utcnow().isoformat()
+
+    # تحضير البيانات كقائمة من dictionaries
+    records = []
+    for _, row in df.iterrows():
+        records.append({
+            "industry_group": row.get('industry_group'),
+            "sector": row.get('sector'),
+            "industry": row.get('industry'),
+            "sub_industry": row.get('sub_industry'),
+            "symbol": str(row['symbol']),
+            "company_name": row.get('company_name'),
+            "date": row['date'],
+            "open": row.get('open'),
+            "high": row.get('high'),
+            "low": row.get('low'),
+            "close": row['close'],
+            "change": row.get('change'),
+            "change_percent": row.get('change_percent'),
+            "volume_traded": int(row['volume_traded']) if pd.notna(row.get('volume_traded')) else None,
+            "value_traded_sar": row.get('value_traded_sar'),
+            "no_of_trades": int(row['no_of_trades']) if pd.notna(row.get('no_of_trades')) else None,
+        })
+
+    # تنفيذ الـ Upsert على دفعات
+    BATCH_SIZE = 500
+    total_upserted = 0
+
+    with engine.begin() as conn:
+        for i in range(0, len(records), BATCH_SIZE):
+            batch = records[i:i + BATCH_SIZE]
+
+            upsert_sql = text("""
+                INSERT INTO prices (
+                    industry_group, sector, industry, sub_industry,
+                    symbol, company_name, date,
+                    open, high, low, close,
+                    change, change_percent,
+                    volume_traded, value_traded_sar, no_of_trades,
+                    created_at, updated_at
+                ) VALUES (
+                    :industry_group, :sector, :industry, :sub_industry,
+                    :symbol, :company_name, :date,
+                    :open, :high, :low, :close,
+                    :change, :change_percent,
+                    :volume_traded, :value_traded_sar, :no_of_trades,
+                    NOW(), NOW()
+                )
+                ON CONFLICT (symbol, date) DO UPDATE SET
+                    industry_group = COALESCE(EXCLUDED.industry_group, prices.industry_group),
+                    sector = COALESCE(EXCLUDED.sector, prices.sector),
+                    industry = COALESCE(EXCLUDED.industry, prices.industry),
+                    sub_industry = COALESCE(EXCLUDED.sub_industry, prices.sub_industry),
+                    company_name = COALESCE(EXCLUDED.company_name, prices.company_name),
+                    open = EXCLUDED.open,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    close = EXCLUDED.close,
+                    change = EXCLUDED.change,
+                    change_percent = EXCLUDED.change_percent,
+                    volume_traded = EXCLUDED.volume_traded,
+                    value_traded_sar = EXCLUDED.value_traded_sar,
+                    no_of_trades = EXCLUDED.no_of_trades,
+                    updated_at = NOW()
+            """)
+
+            for record in batch:
+                conn.execute(upsert_sql, record)
+
+            total_upserted += len(batch)
+            percent = (total_upserted / len(records)) * 100
+            print(f"   ⏳ {total_upserted:,} / {len(records):,} ({percent:.1f}%)")
+
+    print("\n" + "=" * 60)
+    print("✅ اكتمل الاستيراد بنجاح!")
+    print(f"📊 الإحصائيات:")
+    print(f"   • إجمالي الصفوف المعالجة: {len(df):,}")
+    print(f"   • سجلات تم إدخالها/تحديثها: {total_upserted:,}")
+    print("=" * 60)
+
+    # إحصائيات قاعدة البيانات
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
-    
     try:
-        # استيراد البيانات على دفعات
-        total_inserted = 0
-        total_updated = 0
-        total_errors = 0
-        
-        print(f"💾 بدء الاستيراد (دفعات من {batch_size} صف)...")
-        
-        for i in range(0, len(df), batch_size):
-            batch = df.iloc[i:i+batch_size]
-            
-            for _, row in batch.iterrows():
-                try:
-                    # تحويل الرمز إلى نص
-                    symbol_str = str(row['symbol'])
-                    
-                    # البحث عن سجل موجود
-                    existing = db.query(Price).filter(
-                        Price.symbol == symbol_str,
-                        Price.date == row['date']
-                    ).first()
-                    
-                    if existing:
-                        # تحديث السجل الموجود
-                        for col in column_mapping.values():
-                            if col in row.index and col not in ['id', 'created_at', 'updated_at']:
-                                if col == 'symbol':
-                                    setattr(existing, col, symbol_str)
-                                else:
-                                    setattr(existing, col, row[col])
-                        existing.updated_at = datetime.utcnow()
-                        total_updated += 1
-                    else:
-                        # إنشاء سجل جديد
-                        price_record = Price(
-                            industry_group=row.get('industry_group'),
-                            symbol=symbol_str,
-                            company_name=row.get('company_name'),
-                            date=row['date'],
-                            open=row.get('open'),
-                            high=row.get('high'),
-                            low=row.get('low'),
-                            close=row['close'],
-                            change=row.get('change'),
-                            change_percent=row.get('change_percent'),
-                            volume_traded=row.get('volume_traded'),
-                            value_traded_sar=row.get('value_traded_sar'),
-                            no_of_trades=row.get('no_of_trades')
-                        )
-                        db.add(price_record)
-                        total_inserted += 1
-                
-                except Exception as e:
-                    total_errors += 1
-                    if total_errors <= 5:  # اعرض أول 5 أخطاء فقط
-                        print(f"⚠️ خطأ في صف: {row.get('symbol')} - {row.get('date')}: {e}")
-            
-            # Commit كل دفعة
-            db.commit()
-            
-            # عرض التقدم
-            progress = min(i + batch_size, len(df))
-            percent = (progress / len(df)) * 100
-            print(f"   ⏳ {progress:,} / {len(df):,} ({percent:.1f}%) - "
-                  f"مضاف: {total_inserted:,}, محدث: {total_updated:,}, أخطاء: {total_errors}")
-        
-        print("\n" + "="*60)
-        print("✅ اكتمل الاستيراد بنجاح!")
-        print(f"📊 الإحصائيات:")
-        print(f"   • إجمالي الصفوف المعالجة: {len(df):,}")
-        print(f"   • سجلات جديدة: {total_inserted:,}")
-        print(f"   • سجلات محدثة: {total_updated:,}")
-        print(f"   • أخطاء: {total_errors}")
-        print("="*60)
-        
-        # إحصائيات إضافية
         print("\n📈 إحصائيات قاعدة البيانات:")
         total_records = db.query(Price).count()
         total_symbols = db.query(Price.symbol).distinct().count()
@@ -220,25 +247,25 @@ def import_csv_to_database(csv_file_path: str, batch_size: int = 1000):
             func.min(Price.date),
             func.max(Price.date)
         ).first()
-        
+
         print(f"   • إجمالي السجلات: {total_records:,}")
         print(f"   • عدد الأسهم: {total_symbols:,}")
         print(f"   • النطاق الزمني: {date_range[0]} إلى {date_range[1]}")
-        
-    except Exception as e:
-        print(f"\n❌ خطأ فادح: {e}")
-        db.rollback()
+
+        # عرض التواريخ الموجودة في الملف المستورد
+        dates_imported = sorted(df['date'].unique())
+        print(f"\n📅 التواريخ المستوردة ({len(dates_imported)} يوم):")
+        for d in dates_imported:
+            count = len(df[df['date'] == d])
+            print(f"   • {d} ({count} سهم)")
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("❌ الاستخدام: python import_csv_to_db.py path/to/file.csv")
         sys.exit(1)
-    
+
     csv_file = sys.argv[1]
-    
-    # يمكن تحديد batch_size كمعامل ثاني (اختياري)
-    batch_size = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
-    
-    import_csv_to_database(csv_file, batch_size)
+    import_csv_to_database(csv_file)

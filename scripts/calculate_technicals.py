@@ -249,12 +249,11 @@ class TechnicalCalculator:
         # Merge daily market data into df to align rows perfectly
         df = df.merge(market_df[['date', 'market_return', 'market_var']], on='date', how='left')
 
-        # Compute stock covariance vs market
-        def compute_covariance(sub_df):
-            # sub_df maintains its original index from df, ensuring alignement
-            return sub_df['stock_return'].rolling(window=260, min_periods=130).cov(sub_df['market_return'])
-
-        df['cov_stock_market'] = df.groupby('symbol', group_keys=False).apply(compute_covariance)
+        # Compute stock covariance vs market (per-symbol rolling cov)
+        df['cov_stock_market'] = np.nan
+        for sym, grp in df.groupby('symbol'):
+            cov_vals = grp['stock_return'].rolling(window=260, min_periods=130).cov(grp['market_return'])
+            df.loc[grp.index, 'cov_stock_market'] = cov_vals
         
         # Compute Beta
         df['beta'] = df['cov_stock_market'] / df['market_var']
