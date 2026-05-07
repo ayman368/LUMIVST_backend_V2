@@ -66,6 +66,7 @@ tqdm
 argon2-cffi
 
 # Scraper dependencies
+beautifulsoup4
 playwright
 openpyxl
 xlrd
