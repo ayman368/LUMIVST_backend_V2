@@ -19,3 +19,6 @@ parameters_analysis/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Ignore all markdown files
+*.md

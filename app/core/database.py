@@ -27,6 +27,9 @@ from app.models.rs_daily import RSDaily
 from app.models.official_filings import CompanyOfficialFiling
 from app.models.economic_indicators import EconomicIndicator
 from app.models.naaim_exposure import NaaimExposure
+from app.models.market_pulse import MarketPulse
+from app.models.tasi_settings import TasiSettings
+from app.models.wallet import WalletPosition, WalletTrade, WalletSetting, WalletWeeklyStudy
 
 def create_tables():
     """إنشاء الجداول"""

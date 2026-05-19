@@ -142,6 +142,11 @@ def make_screener_key(name: str, target_date: Optional[str], limit: int, offset:
     return f"{PREFIX_SCREENER}:{name_norm}:date:{date_norm}:limit:{limit}:offset:{offset}"
 
 
+def make_screener_historical_key(limit: int) -> str:
+    """Key: screener:historical:limit:{limit}"""
+    return f"{PREFIX_SCREENER}:historical:limit:{limit}"
+
+
 # ============================================================================
 # TECHNICAL_SCREENER.PY Cache Key Generators
 # ============================================================================

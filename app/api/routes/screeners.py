@@ -5,7 +5,7 @@ Stock Screeners API Endpoints
 
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc, func
+from sqlalchemy import and_, desc, func, case, literal
 from typing import List, Optional
 from datetime import date
 import logging
@@ -15,7 +15,8 @@ from app.models.stock_indicators import StockIndicator
 from app.models.rs_daily import RSDaily
 from app.core.cache_helpers import (
     cache_read_through,
-    make_screener_key
+    make_screener_key,
+    make_screener_historical_key
 )
 from app.core.cache_config import CACHE_TTL_SCREENERS
 
@@ -513,4 +514,235 @@ async def get_power_play(
         }
     
     result = await cache_read_through(cache_key, CACHE_TTL_SCREENERS, fetch_screener)
+    return result
+
+
+# ============ HISTORICAL TREND COUNTS (Minervini Trend Chart) ============
+@router.get("/historical-trend")
+async def get_historical_trend(
+    db: Session = Depends(get_db),
+    limit: int = Query(500, ge=1, le=2000),
+):
+    """
+    📈 Historical Trend — Minervini Trend Chart
+    Returns per-date stock counts for 4 screeners:
+      - Trend 1 Month
+      - Trend 4 Months
+      - Trend 5 Months Wide
+      - Alrayan Screener
+    Cached for 24 hours (historical data updates once daily).
+    """
+    cache_key = make_screener_historical_key(limit) + "_v2"
+
+    async def fetch_historical():
+        # ── 1. Trend 5 Months Wide (no RS filter — fastest) ────────────────────
+        wide_rows = (
+            db.query(
+                StockIndicator.date,
+                func.count(StockIndicator.symbol).label("count"),
+            )
+            .filter(
+                and_(
+                    StockIndicator.sma_50 > StockIndicator.sma_200,
+                    StockIndicator.sma_200 > StockIndicator.sma_200_5m_ago,
+                    StockIndicator.price_vs_sma_50_percent > 0.0,
+                    StockIndicator.price_vs_sma_150_percent > 0.0,
+                    StockIndicator.price_vs_sma_200_percent > 0.0,
+                    StockIndicator.sma_30w.isnot(None),
+                    StockIndicator.close > StockIndicator.sma_30w,
+                    StockIndicator.sma_40w.isnot(None),
+                    StockIndicator.close > StockIndicator.sma_40w,
+                )
+            )
+            .group_by(StockIndicator.date)
+            .order_by(StockIndicator.date)
+            .all()
+        )
+        wide_map = {str(row.date): int(row.count) for row in wide_rows}
+
+        # ── 2. Trend 1 Month (needs RS > 69 join) ─────────────────────────────
+        month1_rows = (
+            db.query(
+                StockIndicator.date,
+                func.count(StockIndicator.symbol).label("count"),
+            )
+            .join(
+                RSDaily,
+                and_(
+                    RSDaily.symbol == StockIndicator.symbol,
+                    RSDaily.date == StockIndicator.date,
+                ),
+            )
+            .filter(
+                and_(
+                    RSDaily.rs_rating > 69,
+                    StockIndicator.sma_50 > StockIndicator.sma_150,
+                    StockIndicator.sma_50 > StockIndicator.sma_200,
+                    StockIndicator.sma_150 > StockIndicator.sma_200,
+                    StockIndicator.sma_200 > StockIndicator.sma_200_1m_ago,
+                    StockIndicator.percent_off_52w_low > 30.0,
+                    StockIndicator.percent_off_52w_high > -25.0,
+                    StockIndicator.price_vs_sma_50_percent > 0.0,
+                    StockIndicator.price_vs_sma_150_percent > 0.0,
+                    StockIndicator.price_vs_sma_200_percent > 0.0,
+                    StockIndicator.sma_30w.isnot(None),
+                    StockIndicator.close > StockIndicator.sma_30w,
+                    StockIndicator.sma_40w.isnot(None),
+                    StockIndicator.close > StockIndicator.sma_40w,
+                )
+            )
+            .group_by(StockIndicator.date)
+            .order_by(StockIndicator.date)
+            .all()
+        )
+        month1_map = {str(row.date): int(row.count) for row in month1_rows}
+
+        # ── 3. Trend 4 Months (needs RS > 69 join) ────────────────────────────
+        month4_rows = (
+            db.query(
+                StockIndicator.date,
+                func.count(StockIndicator.symbol).label("count"),
+            )
+            .join(
+                RSDaily,
+                and_(
+                    RSDaily.symbol == StockIndicator.symbol,
+                    RSDaily.date == StockIndicator.date,
+                ),
+            )
+            .filter(
+                and_(
+                    RSDaily.rs_rating > 69,
+                    StockIndicator.sma_50 > StockIndicator.sma_150,
+                    StockIndicator.sma_50 > StockIndicator.sma_200,
+                    StockIndicator.sma_150 > StockIndicator.sma_200,
+                    StockIndicator.sma_200 > StockIndicator.sma_200_1m_ago,
+                    StockIndicator.sma_200 > StockIndicator.sma_200_2m_ago,
+                    StockIndicator.sma_200 > StockIndicator.sma_200_3m_ago,
+                    StockIndicator.sma_200 > StockIndicator.sma_200_4m_ago,
+                    StockIndicator.sma_200_1m_ago > StockIndicator.sma_200_2m_ago,
+                    StockIndicator.sma_200_2m_ago > StockIndicator.sma_200_3m_ago,
+                    StockIndicator.sma_200_3m_ago > StockIndicator.sma_200_4m_ago,
+                    StockIndicator.percent_off_52w_high > -25.0,
+                    StockIndicator.percent_off_52w_low > 30.0,
+                    StockIndicator.price_vs_sma_50_percent > 0.0,
+                    StockIndicator.price_vs_sma_150_percent > 0.0,
+                    StockIndicator.price_vs_sma_200_percent > 0.0,
+                    StockIndicator.sma_30w.isnot(None),
+                    StockIndicator.close > StockIndicator.sma_30w,
+                    StockIndicator.sma_40w.isnot(None),
+                    StockIndicator.close > StockIndicator.sma_40w,
+                )
+            )
+            .group_by(StockIndicator.date)
+            .order_by(StockIndicator.date)
+            .all()
+        )
+        month4_map = {str(row.date): int(row.count) for row in month4_rows}
+
+        # ── 4. Alrayan Screener ───────────────────────────────────────────────
+        alrayan_rows = (
+            db.query(
+                StockIndicator.date,
+                func.count(StockIndicator.symbol).label("count"),
+            )
+            .filter(StockIndicator.trend_signal == True)
+            .group_by(StockIndicator.date)
+            .order_by(StockIndicator.date)
+            .all()
+        )
+        alrayan_map = {str(row.date): int(row.count) for row in alrayan_rows}
+
+        # ── Merge all dates into a single sorted list ──────────────────────────
+        all_dates = sorted(
+            set(wide_map.keys()) | set(month1_map.keys()) | set(month4_map.keys()) | set(alrayan_map.keys())
+        )
+
+        # Optionally limit to last N data points
+        if limit and len(all_dates) > limit:
+            all_dates = all_dates[-limit:]
+
+        series = [
+            {
+                "date": d,
+                "trend_1m": month1_map.get(d, 0),
+                "trend_4m": month4_map.get(d, 0),
+                "trend_5m_wide": wide_map.get(d, 0),
+                "alrayan": alrayan_map.get(d, 0),
+            }
+            for d in all_dates
+        ]
+
+        return {
+            "title": "Minervini Trend",
+            "series": series,
+            "total_dates": len(series),
+        }
+
+    # Cache for 24 hours (86400s) — historical data updates once daily
+    result = await cache_read_through(cache_key, 86400, fetch_historical)
+    return result
+
+
+# ============ HISTORICAL A/D RATING ============
+@router.get("/historical-ad-rating")
+async def get_historical_ad_rating(
+    db: Session = Depends(get_db),
+    limit: int = Query(500, ge=1, le=5000),
+):
+    """
+    📈 Historical A/D Rating
+    Returns per-date stock counts for A/D Rating 'A' and 'D'.
+    Cached for 1 hour.
+    """
+    cache_key = f"screener:historical:ad_rating_v2:limit:{limit}"
+
+    async def fetch_historical():
+        # Count A ratings
+        a_rows = (
+            db.query(
+                RSDaily.date,
+                func.count(RSDaily.symbol).label("count"),
+            )
+            .filter(RSDaily.acc_dis_rating.like('A%'))
+            .group_by(RSDaily.date)
+            .order_by(RSDaily.date)
+            .all()
+        )
+        a_map = {str(row.date): int(row.count) for row in a_rows}
+
+        # Count D ratings
+        d_rows = (
+            db.query(
+                RSDaily.date,
+                func.count(RSDaily.symbol).label("count"),
+            )
+            .filter(RSDaily.acc_dis_rating.like('D%'))
+            .group_by(RSDaily.date)
+            .order_by(RSDaily.date)
+            .all()
+        )
+        d_map = {str(row.date): int(row.count) for row in d_rows}
+
+        all_dates = sorted(set(a_map.keys()) | set(d_map.keys()))
+
+        if limit and len(all_dates) > limit:
+            all_dates = all_dates[-limit:]
+
+        series = [
+            {
+                "date": d,
+                "a_rating": a_map.get(d, 0),
+                "d_rating": d_map.get(d, 0),
+            }
+            for d in all_dates
+        ]
+
+        return {
+            "title": "A/D Rating History",
+            "series": series,
+            "total_dates": len(series),
+        }
+
+    result = await cache_read_through(cache_key, 3600, fetch_historical)
     return result

@@ -1,5 +1,10 @@
 """
 Pydantic schemas for NAAIM Exposure Index API responses.
+
+Changes from previous version:
+  - NaaimLatestResponse now declares `posted_on` and `last_quarter_label` fields that
+    the router was already returning but had no schema definition for. Previously these
+    fields bypassed Pydantic validation entirely.
 """
 
 from pydantic import BaseModel
@@ -42,7 +47,9 @@ class NaaimLatestResponse(BaseModel):
     current: NaaimExposureResponse
     previous: Optional[NaaimExposureResponse] = None
     week_change: Optional[float] = None           # Δ from previous week
-    last_quarter_avg: Optional[float] = None       # Last full quarter avg
+    last_quarter_avg: Optional[float] = None       # Last full quarter avg (from NAAIM page)
+    last_quarter_label: Optional[str] = None       # e.g. "Q1", "Q4" — from NAAIM page text
+    posted_on: Optional[str] = None                # "Posted on Wednesday, May 7, 2025"
     ytd_avg: Optional[float] = None                # Year-to-date avg
     all_time_high: Optional[float] = None          # All-time high NAAIM
     all_time_low: Optional[float] = None           # All-time low NAAIM
@@ -59,7 +66,7 @@ class NaaimHistoryResponse(BaseModel):
 
 # ─── Chart data point ────────────────────────────────
 class NaaimChartPoint(BaseModel):
-    """Lightweight data point optimized for Recharts / Chart.js."""
+    """Lightweight data point optimised for Recharts / Chart.js."""
     date: str                                      # ISO date string
     naaim_index: float
     sp500: Optional[float] = None

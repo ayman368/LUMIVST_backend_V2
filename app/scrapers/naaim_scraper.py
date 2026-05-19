@@ -1,5 +1,5 @@
 """
-NAAIM Exposure Index Scraper — v3
+NAAIM Exposure Index Scraper — v4
 
 Strategy:
   1. First run (mode='full'):  Download full Excel → parse → upsert all.
@@ -9,17 +9,34 @@ Strategy:
 Excel column detection: Name-based first, positional fallback.
 Retry logic on HTTP requests.
 YoY only computed for new records in incremental mode.
+
+Changes from v3:
+  - Single HTTP session created once per scrape_naaim() call and passed down (no
+    redundant connections).
+  - _scrape_html_latest() now returns (records, soup) so _cache_page_metadata() can
+    reuse the already-fetched page instead of making a second HTTP request.
+  - All imports (redis, json, os, re, sqlalchemy.func) moved to module top level.
+  - Silent bare `except: continue` in Excel row parser replaced with logged debug.
+  - Unified Redis socket_timeout constant (REDIS_SOCKET_TIMEOUT).
+  - Cache key constants centralised in CACHE_KEYS dict — single source of truth shared
+    with the router via this module's public symbol.
 """
 
+import io
+import json
+import logging
+import os
+import re
+import sys
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+
+import redis as sync_redis
 import requests
 import pandas as pd
-import io
-import logging
-import time
-from datetime import datetime, date, timedelta
-from typing import List, Dict, Optional, Tuple
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
+from sqlalchemy import func
 from urllib3.util.retry import Retry
 
 from app.core.database import SessionLocal
@@ -34,12 +51,28 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
+# Unified Redis timeout used by both scraper and router
+REDIS_SOCKET_TIMEOUT = 5
+
+# ── Cache key registry ─────────────────────────────────────────
+# Import this dict in the router too so keys are never duplicated.
+CACHE_KEYS = {
+    "latest":        "naaim:latest",
+    "chart_prefix":  "naaim:chart:",
+    "history_prefix": "naaim:history:",
+    "page_metadata": "naaim:page_metadata",
+    "all_pattern":   "naaim:*",
+}
+
 
 # ──────────────────────────────────────────────────────────────
 # HTTP Session with retries
 # ──────────────────────────────────────────────────────────────
-def _get_session() -> requests.Session:
-    """Create a session with automatic retry (3 attempts, backoff)."""
+def _build_session() -> requests.Session:
+    """
+    Create a requests.Session with automatic retry (3 attempts, exponential backoff).
+    Call once per scrape run and pass it down — do not call per sub-function.
+    """
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     s.mount("https://", HTTPAdapter(max_retries=retries))
@@ -49,15 +82,31 @@ def _get_session() -> requests.Session:
 
 
 # ──────────────────────────────────────────────────────────────
+# Redis helper
+# ──────────────────────────────────────────────────────────────
+def _get_redis() -> sync_redis.Redis:
+    """Return a synchronous Redis client with the unified timeout."""
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    return sync_redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_timeout=REDIS_SOCKET_TIMEOUT,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
 # Excel URL Discovery
 # ──────────────────────────────────────────────────────────────
-def _discover_excel_url() -> Optional[str]:
-    """Find the current Excel download link from the NAAIM page."""
+def _discover_excel_url(session: requests.Session, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
+    """
+    Find the current Excel download link from the NAAIM page.
+    Accepts an optional pre-fetched BeautifulSoup object to avoid re-fetching the page.
+    """
     try:
-        session = _get_session()
-        resp = session.get(NAAIM_PAGE_URL, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        if soup is None:
+            resp = session.get(NAAIM_PAGE_URL, timeout=20)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
 
         for link in soup.find_all("a", href=True):
             href = link["href"]
@@ -80,7 +129,6 @@ def _discover_excel_url() -> Optional[str]:
 # ──────────────────────────────────────────────────────────────
 # Excel Parser — name-based column detection + positional fallback
 # ──────────────────────────────────────────────────────────────
-# Expected columns (by name → field):
 _NAME_MAP = {
     "date":          ["date"],
     "naaim_index":   ["mean/average", "mean / average", "naaim number"],
@@ -93,9 +141,11 @@ _NAME_MAP = {
     "sp500":         ["s&p 500", "s&p500", "sp500"],
 }
 
-# Positional fallback (stable since inception):
-_POS_MAP = {0: "date", 1: "naaim_index", 2: "bearish", 3: "quartile_1",
-            4: "quartile_2", 5: "quartile_3", 6: "bullish", 7: "std_deviation", 9: "sp500"}
+# Positional fallback (stable since inception)
+_POS_MAP = {
+    0: "date", 1: "naaim_index", 2: "bearish", 3: "quartile_1",
+    4: "quartile_2", 5: "quartile_3", 6: "bullish", 7: "std_deviation", 9: "sp500",
+}
 
 
 def _detect_columns(columns: list) -> Dict[str, str]:
@@ -111,7 +161,7 @@ def _detect_columns(columns: list) -> Dict[str, str]:
             col_lower = str(col).strip().lower()
             for kw in keywords:
                 if col_lower.startswith(kw) or kw in col_lower:
-                    if field not in col_map:  # Don't overwrite (priority: first match)
+                    if field not in col_map:
                         col_map[field] = col
                     break
 
@@ -136,12 +186,12 @@ def _parse_excel(content: bytes) -> List[Dict]:
         logger.info(f"📊 Column mapping: {col_map}")
 
         if "date" not in col_map or "naaim_index" not in col_map:
-            logger.error(f"❌ Missing required columns (date/naaim_index)")
+            logger.error("❌ Missing required columns (date/naaim_index)")
             return []
 
-        seen_dates = set()
+        seen_dates: set = set()
 
-        for _, row in df.iterrows():
+        for idx, row in df.iterrows():
             try:
                 # Date — ensure it's always a Python date, not pd.Timestamp
                 raw = row[col_map["date"]]
@@ -168,7 +218,7 @@ def _parse_excel(content: bytes) -> List[Dict]:
 
                 # Optional fields
                 for field in ["sp500", "bearish", "quartile_1", "quartile_2",
-                              "quartile_3", "bullish", "std_deviation"]:
+                               "quartile_3", "bullish", "std_deviation"]:
                     if field in col_map:
                         v = row[col_map[field]]
                         if pd.notna(v):
@@ -176,7 +226,10 @@ def _parse_excel(content: bytes) -> List[Dict]:
                             record[field] = float(val)
 
                 records.append(record)
-            except Exception:
+
+            except Exception as e:
+                # Log so parse failures are visible during debugging; don't swallow silently.
+                logger.warning(f"  ↪ Skipping row {idx}: {e}")
                 continue
 
     except Exception as e:
@@ -189,11 +242,18 @@ def _parse_excel(content: bytes) -> List[Dict]:
 # ──────────────────────────────────────────────────────────────
 # HTML Scraper
 # ──────────────────────────────────────────────────────────────
-def _scrape_html_latest() -> List[Dict]:
-    """Scrape the NAAIM page HTML tables for latest data."""
+def _scrape_html_latest(
+    session: requests.Session,
+) -> Tuple[List[Dict], Optional[BeautifulSoup]]:
+    """
+    Scrape the NAAIM page HTML tables for latest data.
+
+    Returns (records, soup) so callers can reuse the fetched page
+    (e.g. for metadata caching) without an extra HTTP request.
+    """
     records = []
+    soup: Optional[BeautifulSoup] = None
     try:
-        session = _get_session()
         resp = session.get(NAAIM_PAGE_URL, timeout=20)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -261,9 +321,12 @@ def _scrape_html_latest() -> List[Dict]:
         logger.error(f"❌ HTML scraping error: {e}")
 
     logger.info(f"🔍 Scraped {len(records)} records from HTML")
-    return records
+    return records, soup
 
 
+# ──────────────────────────────────────────────────────────────
+# Date / float helpers
+# ──────────────────────────────────────────────────────────────
 def _parse_date(s: str) -> Optional[date]:
     for fmt in ("%b %d, %Y", "%m/%d/%Y", "%Y-%m-%d", "%d/%m/%Y"):
         try:
@@ -282,12 +345,16 @@ def _safe_float(cell) -> Optional[float]:
 
 
 # ──────────────────────────────────────────────────────────────
-# YoY — only for specified records, using a full lookup
+# YoY calculation
 # ──────────────────────────────────────────────────────────────
-def _calculate_yoy(records: List[Dict], lookup: Optional[Dict[date, float]] = None) -> List[Dict]:
+def _calculate_yoy(
+    records: List[Dict],
+    lookup: Optional[Dict[date, float]] = None,
+) -> List[Dict]:
     """
     Compute YoY % for records using lookup for historical reference.
-    If lookup is None, build it from records themselves.
+    If lookup is None, build it from records themselves (full-history mode).
+    Uses fuzzy ±7 day matching to handle misaligned survey weeks.
     """
     if lookup is None:
         lookup = {r["date"]: r["naaim_index"] for r in records}
@@ -299,9 +366,11 @@ def _calculate_yoy(records: List[Dict], lookup: Optional[Dict[date, float]] = No
         except ValueError:
             target = date(dt.year - 1, dt.month, dt.day - 1)
 
-        # Exact
+        # Exact match first
         if target in lookup and lookup[target] != 0:
-            record["yoy_pct"] = round(((record["naaim_index"] - lookup[target]) / abs(lookup[target])) * 100, 2)
+            record["yoy_pct"] = round(
+                ((record["naaim_index"] - lookup[target]) / abs(lookup[target])) * 100, 2
+            )
             continue
 
         # Fuzzy ±7 days
@@ -313,7 +382,9 @@ def _calculate_yoy(records: List[Dict], lookup: Optional[Dict[date, float]] = No
                 best = c
 
         if best and lookup[best] != 0:
-            record["yoy_pct"] = round(((record["naaim_index"] - lookup[best]) / abs(lookup[best])) * 100, 2)
+            record["yoy_pct"] = round(
+                ((record["naaim_index"] - lookup[best]) / abs(lookup[best])) * 100, 2
+            )
 
     return records
 
@@ -324,7 +395,6 @@ def _calculate_yoy(records: List[Dict], lookup: Optional[Dict[date, float]] = No
 def _get_last_db_date() -> Optional[date]:
     db = SessionLocal()
     try:
-        from sqlalchemy import func
         return db.query(func.max(NaaimExposure.date)).scalar()
     finally:
         db.close()
@@ -334,9 +404,11 @@ def _get_historical_lookup(since: date) -> Dict[date, float]:
     """Load historical naaim_index values from DB for YoY reference."""
     db = SessionLocal()
     try:
-        rows = db.query(NaaimExposure.date, NaaimExposure.naaim_index).filter(
-            NaaimExposure.date >= since
-        ).all()
+        rows = (
+            db.query(NaaimExposure.date, NaaimExposure.naaim_index)
+            .filter(NaaimExposure.date >= since)
+            .all()
+        )
         return {r.date: r.naaim_index for r in rows}
     finally:
         db.close()
@@ -375,10 +447,60 @@ def _upsert_records(records: List[Dict]) -> Tuple[int, int]:
 
 
 # ──────────────────────────────────────────────────────────────
-# Main
+# Page metadata cache
+# ──────────────────────────────────────────────────────────────
+def _cache_page_metadata(soup: Optional[BeautifulSoup] = None, session: Optional[requests.Session] = None) -> None:
+    """
+    Extract Last Quarter Avg + Posted On from the NAAIM page and store in Redis.
+
+    Accepts a pre-fetched soup to avoid a redundant HTTP request.
+    Falls back to fetching the page itself only when soup is not provided.
+    """
+    try:
+        if soup is None:
+            if session is None:
+                session = _build_session()
+            resp = session.get(NAAIM_PAGE_URL, timeout=15)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+        text = soup.get_text()
+        metadata: Dict = {}
+
+        match = re.search(r'Last\s*Quarter\s*Average\s*\(Q\d\)\s*(\d+\.?\d*)', text)
+        if match:
+            metadata["last_quarter_avg"] = float(match.group(1))
+            logger.info(f"📊 Cached Last Quarter Avg: {metadata['last_quarter_avg']}")
+
+        match = re.search(r'\*?\s*Posted\s+on\s+(\w+,\s+\w+\s+\d+,\s+\d{4})', text)
+        if match:
+            metadata["posted_on"] = match.group(1)
+            logger.info(f"📊 Cached Posted On: {metadata['posted_on']}")
+
+        # Also extract current quarter label (e.g. "Q2") for the frontend
+        q_match = re.search(r'Last\s*Quarter\s*Average\s*\((Q\d)\)', text)
+        if q_match:
+            metadata["last_quarter_label"] = q_match.group(1)
+
+        if metadata:
+            r = _get_redis()
+            try:
+                r.set(CACHE_KEYS["page_metadata"], json.dumps(metadata), ex=604800)  # 7 days TTL
+                logger.info("✅ Page metadata cached in Redis")
+            finally:
+                r.close()
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to cache page metadata: {e}")
+
+
+# ──────────────────────────────────────────────────────────────
+# Main entry point
 # ──────────────────────────────────────────────────────────────
 def scrape_naaim(mode: str = "auto") -> Dict:
     """
+    Scrape NAAIM data and upsert into the database.
+
     Modes:
       'auto'        — DB empty → full; otherwise → incremental.
       'full'        — Download full Excel history.
@@ -394,14 +516,16 @@ def scrape_naaim(mode: str = "auto") -> Dict:
         mode = "full" if last_date is None else "incremental"
         logger.info(f"📊 [NAAIM] Auto → {mode}")
 
-    records = []
+    # Single session for the entire scrape run
+    session = _build_session()
+    records: List[Dict] = []
+    page_soup: Optional[BeautifulSoup] = None  # reused for metadata caching
 
     if mode == "full":
         # ── Full Excel ──
-        excel_url = _discover_excel_url()
+        excel_url = _discover_excel_url(session)
         if excel_url:
             try:
-                session = _get_session()
                 logger.info("⬇️ Downloading Excel...")
                 resp = session.get(excel_url, timeout=30)
                 resp.raise_for_status()
@@ -411,17 +535,17 @@ def scrape_naaim(mode: str = "auto") -> Dict:
 
         if not records:
             logger.info("🔄 Trying HTML fallback...")
-            records = _scrape_html_latest()
+            records, page_soup = _scrape_html_latest(session)
 
         if not records:
             return {"status": "error", "message": "No data", "inserted": 0, "updated": 0}
 
         records.sort(key=lambda r: r["date"])
-        records = _calculate_yoy(records)  # Full YoY from self-lookup
+        records = _calculate_yoy(records)
 
     elif mode == "incremental":
-        # ── HTML for recent weeks ──
-        records = _scrape_html_latest()
+        # ── HTML for recent weeks (reuse soup for metadata) ──
+        records, page_soup = _scrape_html_latest(session)
 
         # Filter to only new records
         if last_date:
@@ -429,13 +553,12 @@ def scrape_naaim(mode: str = "auto") -> Dict:
             records = [r for r in records if r["date"] > last_date]
             logger.info(f"📊 Filtered: {before} → {len(records)} new records")
 
-        # Fallback to Excel if HTML got nothing
+        # Fallback to Excel if HTML got nothing new
         if not records:
             logger.info("🔄 No new HTML data, trying Excel...")
-            excel_url = _discover_excel_url()
+            excel_url = _discover_excel_url(session, soup=page_soup)
             if excel_url:
                 try:
-                    session = _get_session()
                     resp = session.get(excel_url, timeout=30)
                     resp.raise_for_status()
                     all_recs = _parse_excel(resp.content)
@@ -445,25 +568,24 @@ def scrape_naaim(mode: str = "auto") -> Dict:
 
         if not records:
             logger.info("📊 [NAAIM] No new data.")
-            _cache_page_metadata()  # Still cache page metadata
+            _cache_page_metadata(soup=page_soup, session=session)
             return {"status": "no_new_data", "inserted": 0, "updated": 0}
 
         records.sort(key=lambda r: r["date"])
 
-        # YoY: use DB historical lookup (only load ~14 months back)
+        # YoY: use DB historical lookup (~14 months back)
         earliest_new = records[0]["date"]
         lookup_since = date(earliest_new.year - 1, max(1, earliest_new.month - 1), 1)
         historical = _get_historical_lookup(lookup_since)
-        # Add new records to lookup so they can reference each other
         for r in records:
             historical[r["date"]] = r["naaim_index"]
         records = _calculate_yoy(records, lookup=historical)
 
-    # Upsert
+    # Upsert into DB
     inserted, updated = _upsert_records(records)
 
-    # Scrape + cache page metadata (Last Quarter Avg, Posted On)
-    _cache_page_metadata()
+    # Cache page metadata — reuse already-fetched soup (zero extra HTTP requests)
+    _cache_page_metadata(soup=page_soup, session=session)
 
     result = {
         "status": "success",
@@ -477,47 +599,9 @@ def scrape_naaim(mode: str = "auto") -> Dict:
     return result
 
 
-def _cache_page_metadata():
-    """Scrape Last Quarter Avg + Posted On from the NAAIM page, store in Redis."""
-    import re
-    import json
-    try:
-        session = _get_session()
-        resp = session.get(NAAIM_PAGE_URL, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        text = soup.get_text()
-
-        metadata = {}
-
-        match = re.search(r'Last\s*Quarter\s*Average\s*\(Q\d\)\s*(\d+\.?\d*)', text)
-        if match:
-            metadata["last_quarter_avg"] = float(match.group(1))
-            logger.info(f"📊 Cached Last Quarter Avg: {metadata['last_quarter_avg']}")
-
-        match = re.search(r'\*?\s*Posted\s+on\s+(\w+,\s+\w+\s+\d+,\s+\d{4})', text)
-        if match:
-            metadata["posted_on"] = match.group(1)
-            logger.info(f"📊 Cached Posted On: {metadata['posted_on']}")
-
-        if metadata:
-            import redis as sync_redis
-            import os
-            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-            r = sync_redis.from_url(redis_url, decode_responses=True, socket_timeout=5)
-            r.set("naaim:page_metadata", json.dumps(metadata), ex=604800)  # 7 days TTL
-            r.close()
-            logger.info(f"✅ Page metadata cached in Redis")
-
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to cache page metadata: {e}")
-
-
 # ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import sys
     logging.basicConfig(level=logging.INFO)
-    # Usage: python -m app.scrapers.naaim_scraper [full|incremental|auto]
     m = sys.argv[1] if len(sys.argv) > 1 else "auto"
     result = scrape_naaim(mode=m)
     print(result)

@@ -23,6 +23,10 @@ from app.models.price import Price
 from app.services.daily_detailed_scraper import scrape_daily_details
 # ✅ استخدام الـ Calculator النهائي
 from scripts.calculate_rs_final_precise import RSCalculatorUltraFast
+# 📊 استيراد Reports Scraper
+from scrapers.Reports import main as run_reports_scraper
+# 📊 استيراد تحديث الـ Market Pulse
+from scripts.backfill_market_pulse import main as run_market_pulse_backfill
 
 # إعداد الـ Logging
 logging.basicConfig(level=logging.INFO)
@@ -57,6 +61,35 @@ def load_full_hierarchy_mapping():
         
     return mapping
 
+def run_historical_reports_scraper():
+    """
+    تشغيل سكريبت تجميع التقارير التاريخية من سوق الأسهم السعودي (TASI)
+    """
+    try:
+        logger.info("🏭 Starting Historical Reports Scraper...")
+        run_reports_scraper()
+        logger.info("✅ Historical Reports Scraper completed successfully!")
+        return True
+    except Exception as e:
+        logger.error(f"⚠️ Historical Reports Scraper encountered an error: {e}")
+        logger.error(traceback.format_exc())
+        # Don't fail the entire daily update if reports scraper fails
+        return False
+
+def update_market_pulse():
+    """
+    تشغيل سكريبت backfill_market_pulse لحساب إشارات Market Pulse للأيام الجديدة فقط
+    """
+    try:
+        logger.info("📈 Starting Market Pulse Daily Update...")
+        run_market_pulse_backfill()
+        logger.info("✅ Market Pulse Daily Update completed successfully!")
+        return True
+    except Exception as e:
+        logger.error(f"⚠️ Market Pulse Daily Update encountered an error: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
 def update_daily(target_date_str=None):
     """
     1. Scrape Daily Data
@@ -79,6 +112,12 @@ def update_daily(target_date_str=None):
             WHERE id = 1
         """), {"now": dt_module.datetime.utcnow()})
         db.commit()
+        
+        # 0.1 Run Historical Reports Scraper
+        run_historical_reports_scraper()
+        
+        # 0.2 Run Market Pulse Update
+        update_market_pulse()
         
         # 0.5 Load Mappings
         hierarchy_map = load_full_hierarchy_mapping()
@@ -291,8 +330,8 @@ def update_daily(target_date_str=None):
         # -------------------------------------------------------------------
         try:
             import asyncio
-            from app.core.cache_helpers import invalidate_all_caches
-            asyncio.run(invalidate_all_caches())
+            from app.core.redis import redis_cache
+            asyncio.run(redis_cache.flush_all())
             logger.info("🧹 Application caches cleared successfully. New data is now live.")
         except Exception as cache_err:
             logger.error(f"⚠️ Failed to invalidate caches: {cache_err}")

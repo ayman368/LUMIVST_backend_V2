@@ -76,3 +76,4 @@ python-json-logger
 opentelemetry-api
 opentelemetry-sdk
 
+yfinance

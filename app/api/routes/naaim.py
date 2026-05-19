@@ -3,9 +3,19 @@ NAAIM Exposure Index API Router
 
 Endpoints:
   GET  /api/naaim/latest      → Current value + summary statistics
-  GET  /api/naaim/history      → Paginated historical data
-  GET  /api/naaim/chart-data   → Chart-ready data with moving averages
-  POST /api/naaim/scrape       → Trigger manual scrape (protected)
+  GET  /api/naaim/history     → Paginated historical data
+  GET  /api/naaim/chart-data  → Chart-ready data with moving averages
+  POST /api/naaim/scrape      → Trigger manual scrape (protected by X-Internal-Key)
+
+Changes from previous version:
+  - GET /scrape endpoint removed — it was a security risk (proxies/CDNs could trigger
+    scrapes without authentication). Admin dashboard should use POST /scrape instead.
+  - Cache key strings replaced with CACHE_KEYS constants imported from the scraper
+    module — single source of truth, no more copy/paste typos between files.
+  - `posted_on` and `last_quarter_label` now properly included in the response dict
+    (they were already being sent but not declared in the Pydantic schema).
+  - Redis socket_timeout unified via REDIS_SOCKET_TIMEOUT constant from scraper module.
+  - Cache-clear after scrape uses CACHE_KEYS["all_pattern"] — no hardcoded "naaim:*".
 """
 
 import logging
@@ -17,7 +27,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func, extract
+from sqlalchemy import desc, func
 
 from app.core.database import get_db
 from app.core.security import verify_internal_key
@@ -30,52 +40,57 @@ from app.schemas.naaim_exposure import (
     NaaimChartPoint,
     NaaimChartResponse,
 )
+# Import cache key registry and Redis timeout from the scraper — single source of truth
+from app.scrapers.naaim_scraper import CACHE_KEYS, REDIS_SOCKET_TIMEOUT
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 # ──────────────────────────────────────────────────────────────
-# Helper: read last quarter avg + posted date from Redis
+# Helper: read page metadata (last_quarter_avg, last_quarter_label, posted_on)
 # ──────────────────────────────────────────────────────────────
 def _get_cached_page_metadata() -> dict:
     """
-    Read the NAAIM page metadata (last_quarter_avg, posted_on) from Redis.
-    This data is populated by the scraper.
+    Read NAAIM page metadata from Redis.
+    Populated by the scraper after each successful run.
     """
     import json
     import os
     import redis as sync_redis
-    
-    result = {"last_quarter_avg": None, "posted_on": None}
+
+    result = {"last_quarter_avg": None, "last_quarter_label": None, "posted_on": None}
     try:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        r = sync_redis.from_url(redis_url, decode_responses=True, socket_timeout=2)
-        cached = r.get("naaim:page_metadata")
+        r = sync_redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_timeout=REDIS_SOCKET_TIMEOUT,
+        )
+        cached = r.get(CACHE_KEYS["page_metadata"])
         r.close()
-        
+
         if cached:
             data = json.loads(cached)
             result["last_quarter_avg"] = data.get("last_quarter_avg")
+            result["last_quarter_label"] = data.get("last_quarter_label")
             result["posted_on"] = data.get("posted_on")
     except Exception as e:
-        logger.warning(f"⚠️ Failed to read NAAIM page info from Redis: {e}")
-        
+        logger.warning(f"⚠️ Failed to read NAAIM page metadata from Redis: {e}")
+
     return result
 
 
 # ──────────────────────────────────────────────────────────────
-# GET /latest — Current value + summary statistics
+# GET /latest
 # ──────────────────────────────────────────────────────────────
 def _fetch_latest(db: Session) -> dict:
-    """Build the latest response with stats."""
+    """Build the latest response dict with statistics."""
 
-    # Current (most recent) record
     current = db.query(NaaimExposure).order_by(desc(NaaimExposure.date)).first()
     if not current:
         return None
 
-    # Previous record
     previous = (
         db.query(NaaimExposure)
         .filter(NaaimExposure.date < current.date)
@@ -83,19 +98,19 @@ def _fetch_latest(db: Session) -> dict:
         .first()
     )
 
-    # Week change
     week_change = None
     if previous:
         week_change = round(current.naaim_index - previous.naaim_index, 2)
 
     today = date.today()
 
-    # Last quarter average + posted date — read from Redis (cached by scraper)
+    # Page metadata from Redis (populated by scraper)
     page_info = _get_cached_page_metadata()
     last_quarter_avg = page_info.get("last_quarter_avg")
+    last_quarter_label = page_info.get("last_quarter_label")
     posted_on = page_info.get("posted_on")
 
-    # Fallback: compute from DB if scraping failed
+    # Fallback: compute last_quarter_avg from DB if Redis has nothing
     if last_quarter_avg is None:
         current_quarter = (today.month - 1) // 3 + 1
         if current_quarter == 1:
@@ -126,11 +141,10 @@ def _fetch_latest(db: Session) -> dict:
         .scalar()
     )
 
-    # All-time high/low
+    # All-time high / low
     all_time_high = db.query(func.max(NaaimExposure.naaim_index)).scalar()
     all_time_low = db.query(func.min(NaaimExposure.naaim_index)).scalar()
 
-    # Total records
     total_records = db.query(func.count(NaaimExposure.id)).scalar()
 
     return {
@@ -138,7 +152,8 @@ def _fetch_latest(db: Session) -> dict:
         "previous": _to_response(previous) if previous else None,
         "week_change": week_change,
         "last_quarter_avg": round(float(last_quarter_avg), 2) if last_quarter_avg is not None else None,
-        "posted_on": posted_on,
+        "last_quarter_label": last_quarter_label,   # e.g. "Q1" — declared in schema now
+        "posted_on": posted_on,                     # declared in schema now
         "ytd_avg": round(float(ytd_avg), 2) if ytd_avg else None,
         "all_time_high": float(all_time_high) if all_time_high else None,
         "all_time_low": float(all_time_low) if all_time_low else None,
@@ -147,7 +162,7 @@ def _fetch_latest(db: Session) -> dict:
 
 
 def _to_response(obj) -> dict:
-    """Convert SQLAlchemy model to response dict."""
+    """Convert SQLAlchemy NaaimExposure model instance to a plain dict."""
     if not obj:
         return None
     return {
@@ -170,7 +185,7 @@ def _to_response(obj) -> dict:
 @router.get("/latest")
 async def get_naaim_latest(db: Session = Depends(get_db)):
     """Get the most recent NAAIM Exposure Index value with summary statistics."""
-    cache_key = "naaim:latest"
+    cache_key = CACHE_KEYS["latest"]
     cached = await redis_cache.get(cache_key)
     if cached:
         return JSONResponse(content=cached)
@@ -180,7 +195,7 @@ async def get_naaim_latest(db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No NAAIM data available")
 
     try:
-        await redis_cache.set(cache_key, result, expire=1800)  # 30 min cache
+        await redis_cache.set(cache_key, result, expire=1800)  # 30 min
     except Exception as e:
         logger.warning(f"Failed to cache NAAIM latest: {e}")
 
@@ -188,10 +203,9 @@ async def get_naaim_latest(db: Session = Depends(get_db)):
 
 
 # ──────────────────────────────────────────────────────────────
-# GET /history — Paginated historical data
+# GET /history
 # ──────────────────────────────────────────────────────────────
 def _fetch_history(db: Session, limit: int, offset: int, start_date, end_date) -> dict:
-    """Fetch paginated historical data."""
     query = db.query(NaaimExposure)
 
     if start_date:
@@ -224,7 +238,7 @@ async def get_naaim_history(
     db: Session = Depends(get_db),
 ):
     """Get paginated NAAIM historical data."""
-    cache_key = f"naaim:history:{limit}:{offset}:{start_date}:{end_date}"
+    cache_key = f"{CACHE_KEYS['history_prefix']}{limit}:{offset}:{start_date}:{end_date}"
     cached = await redis_cache.get(cache_key)
     if cached:
         return JSONResponse(content=cached)
@@ -240,10 +254,10 @@ async def get_naaim_history(
 
 
 # ──────────────────────────────────────────────────────────────
-# GET /chart-data — Recharts/Chart.js ready data
+# GET /chart-data
 # ──────────────────────────────────────────────────────────────
 def _fetch_chart_data(db: Session, limit: int) -> dict:
-    """Build chart-optimized data with 2-week moving average."""
+    """Build chart-optimised data with 2-week moving average."""
     records = (
         db.query(
             NaaimExposure.date,
@@ -260,15 +274,9 @@ def _fetch_chart_data(db: Session, limit: int) -> dict:
     if not records:
         return {"data": [], "last_updated": None}
 
-    # Build data points with 2-week (2-point) moving average
     data_points = []
     for i, r in enumerate(records):
-        # 2-week MA (current + previous)
-        if i >= 1:
-            ma = round((records[i].naaim_index + records[i - 1].naaim_index) / 2, 2)
-        else:
-            ma = r.naaim_index
-
+        ma = round((records[i].naaim_index + records[i - 1].naaim_index) / 2, 2) if i >= 1 else r.naaim_index
         data_points.append({
             "date": r.date.isoformat(),
             "naaim_index": r.naaim_index,
@@ -278,11 +286,7 @@ def _fetch_chart_data(db: Session, limit: int) -> dict:
         })
 
     last_updated = records[-1].updated_at.isoformat() if records[-1].updated_at else None
-
-    return {
-        "data": data_points,
-        "last_updated": last_updated,
-    }
+    return {"data": data_points, "last_updated": last_updated}
 
 
 @router.get("/chart-data")
@@ -291,7 +295,7 @@ async def get_naaim_chart_data(
     db: Session = Depends(get_db),
 ):
     """Get chart-ready NAAIM data with moving averages for Recharts / Chart.js."""
-    cache_key = f"naaim:chart:{limit}"
+    cache_key = f"{CACHE_KEYS['chart_prefix']}{limit}"
     cached = await redis_cache.get(cache_key)
     if cached:
         return JSONResponse(content=cached)
@@ -307,14 +311,20 @@ async def get_naaim_chart_data(
 
 
 # ──────────────────────────────────────────────────────────────
-# POST /scrape — Trigger manual scrape (Protected)
+# POST /scrape — Protected manual trigger
 # ──────────────────────────────────────────────────────────────
 @router.post("/scrape")
 def trigger_naaim_scrape(
     mode: str = Query("auto", description="Scrape mode: auto, full, incremental"),
     _: bool = Depends(verify_internal_key),
 ):
-    """Manually trigger the NAAIM scraper. Protected by X-Internal-Key header."""
+    """
+    Manually trigger the NAAIM scraper.
+    Protected by X-Internal-Key header.
+
+    Note: The previous GET /scrape endpoint has been removed. GET endpoints are
+    cached by proxies and CDNs and could bypass authentication. Use POST only.
+    """
     from app.scrapers.naaim_scraper import scrape_naaim
 
     def _scrape_with_error_handling():
@@ -322,16 +332,20 @@ def trigger_naaim_scrape(
             result = scrape_naaim(mode=mode)
             logger.info(f"NAAIM scraping completed: {result}")
 
-            # Clear cache after successful scrape
+            # Clear all NAAIM cache keys after successful scrape
             try:
-                import redis as sync_redis
                 import os
+                import redis as sync_redis
                 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-                r = sync_redis.from_url(redis_url, decode_responses=True, socket_timeout=5)
-                keys = r.keys("naaim:*")
+                r = sync_redis.from_url(
+                    redis_url,
+                    decode_responses=True,
+                    socket_timeout=REDIS_SOCKET_TIMEOUT,
+                )
+                keys = r.keys(CACHE_KEYS["all_pattern"])
                 if keys:
                     r.delete(*keys)
-                logger.info(f"🗑️ Cleared {len(keys)} NAAIM cache keys")
+                    logger.info(f"🗑️ Cleared {len(keys)} NAAIM cache keys")
                 r.close()
             except Exception as e:
                 logger.warning(f"⚠️ NAAIM cache clear failed: {e}")
@@ -342,16 +356,3 @@ def trigger_naaim_scrape(
     thread = threading.Thread(target=_scrape_with_error_handling, daemon=True)
     thread.start()
     return {"message": f"NAAIM scraping started (mode={mode})"}
-
-
-# ──────────────────────────────────────────────────────────────
-# GET /scrape — Alternative GET trigger for Admin Dashboard
-# ──────────────────────────────────────────────────────────────
-@router.get("/scrape")
-def trigger_naaim_scrape_get(
-    mode: str = Query("auto", description="Scrape mode: auto, full, incremental"),
-    _: bool = Depends(verify_internal_key),
-):
-    """GET trigger for NAAIM scraper (Admin Dashboard compatible)."""
-    return trigger_naaim_scrape(mode=mode, _=_)
-

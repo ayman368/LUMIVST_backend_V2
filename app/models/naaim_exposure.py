@@ -3,7 +3,7 @@ NAAIM Exposure Index Model
 Stores weekly NAAIM survey data alongside S&P 500 close values.
 """
 
-from sqlalchemy import Column, Integer, Date, Numeric, DateTime, Float
+from sqlalchemy import Column, Integer, Date, DateTime, Float
 from sqlalchemy.sql import func
 from app.core.database import Base
 

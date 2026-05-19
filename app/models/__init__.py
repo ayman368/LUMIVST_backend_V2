@@ -18,3 +18,5 @@ from app.models.market_reports import (
     SBLPosition,
 )
 from app.models.naaim_exposure import NaaimExposure
+from app.models.market_pulse import MarketPulse
+from app.models.tasi_settings import TasiSettings

@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import stocks, cache, auth, contact, rs, rs_v2, admin, scraper, official_filings, financial_details, prices, technical_screener, financial_metrics, screeners, market_breadth, market_reports, economic_indicators, xbrl_companies, xbrl_financials, xbrl_upload
 from app.api.routes import naaim as naaim_router
+from app.api.routes import market_pulse as market_pulse_router
+from app.api.routes import rs_line as rs_line_router
+from app.api.routes import mansfield_rs as mansfield_rs_router
+from app.api.routes import sata as sata_router
+from app.api.routes import tasi_settings as tasi_settings_router
 
 # ... (Previous code)
 
@@ -132,6 +137,24 @@ app.include_router(naaim_router.router, prefix="/api/naaim", tags=["NAAIM Exposu
 app.include_router(xbrl_companies.router, dependencies=protected_dependencies)
 app.include_router(xbrl_financials.router, dependencies=protected_dependencies)
 app.include_router(xbrl_upload.router, dependencies=protected_dependencies)
+app.include_router(market_pulse_router.router, prefix="/api/market-pulse", tags=["Market Pulse"])
+app.include_router(rs_line_router.router, tags=["RS Line Indicators"], dependencies=protected_dependencies)
+app.include_router(mansfield_rs_router.router, prefix="/api/indicators/mansfield-rs", tags=["Indicators"], dependencies=protected_dependencies)
+app.include_router(sata_router.router, prefix="/api/indicators/sata", tags=["SATA & Stage Analysis"], dependencies=protected_dependencies)
+app.include_router(tasi_settings_router.router, prefix="/api/tasi-settings", tags=["TASI Settings"])
+
+# ── Wallet / Finance System ──
+from app.api.routes.wallet import calculator as wallet_calculator
+from app.api.routes.wallet import rbaf as wallet_rbaf
+from app.api.routes.wallet import portfolio as wallet_portfolio
+from app.api.routes.wallet import tracker as wallet_tracker
+from app.api.routes.wallet import weekly as wallet_weekly
+
+app.include_router(wallet_calculator.router, prefix="/api/wallet/calculator", tags=["Wallet - Risk Calculator"], dependencies=protected_dependencies)
+app.include_router(wallet_rbaf.router, prefix="/api/wallet/rbaf", tags=["Wallet - RBAF"], dependencies=protected_dependencies)
+app.include_router(wallet_portfolio.router, prefix="/api/wallet/portfolio", tags=["Wallet - Portfolio"], dependencies=protected_dependencies)
+app.include_router(wallet_tracker.router, prefix="/api/wallet/tracker", tags=["Wallet - Monthly Tracker"], dependencies=protected_dependencies)
+app.include_router(wallet_weekly.router, prefix="/api/wallet/weekly", tags=["Wallet - Weekly Study"], dependencies=protected_dependencies)
 
 # Event handlers
 @app.on_event("startup")
