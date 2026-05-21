@@ -112,6 +112,18 @@ class PortfolioPositionDBUpdate(BaseModel):
     entry_date: Optional[date] = None
 
 
+class PortfolioPositionAddRequest(BaseModel):
+    qty: float = Field(..., gt=0, description="Quantity to add")
+    buy_price: float = Field(..., gt=0, description="Buy price of the new shares")
+    trade_date: date = Field(..., description="Date of the addition")
+
+
+class PortfolioPositionSellRequest(BaseModel):
+    qty: float = Field(..., gt=0, description="Quantity to sell")
+    sell_price: float = Field(..., gt=0, description="Sell price of the shares")
+    trade_date: date = Field(..., description="Date of the sale")
+
+
 class PortfolioPositionDB(BaseModel):
     id: int
     symbol: str

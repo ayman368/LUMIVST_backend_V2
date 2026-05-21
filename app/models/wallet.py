@@ -16,6 +16,7 @@ class WalletPosition(Base):
     buy_price = Column(Numeric(18, 4), nullable=False, default=0)
     stop_price = Column(Numeric(18, 4), nullable=True)
     portfolio_name = Column(String(100), nullable=False, default="Default")
+    transactions = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     entry_date = Column(Date, nullable=False, server_default=func.current_date())
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

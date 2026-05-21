@@ -9,6 +9,8 @@ from app.schemas.wallet import (
     PortfolioPositionDB,
     PortfolioPositionDBCreate,
     PortfolioPositionDBUpdate,
+    PortfolioPositionAddRequest,
+    PortfolioPositionSellRequest,
 )
 from app.models.wallet import WalletPosition
 from app.models.price import Price
@@ -226,3 +228,113 @@ def close_position(
     db.commit()
 
     return {"message": "Position closed successfully", "realized_pnl": realized_pnl}
+
+
+@router.post(
+    "/positions/{position_id}/add",
+    response_model=PortfolioPositionDB,
+    summary="Add shares to an existing position (Scaling in)",
+)
+def add_shares_to_position(
+    position_id: int,
+    req: PortfolioPositionAddRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    position = (
+        db.query(WalletPosition)
+        .filter(WalletPosition.id == position_id, WalletPosition.user_id == current_user.id)
+        .first()
+    )
+    if not position:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
+
+    old_qty = float(position.qty)
+    old_price = float(position.buy_price)
+    new_qty = req.qty
+    new_price = req.buy_price
+
+    total_qty = old_qty + new_qty
+    weighted_price = ((old_qty * old_price) + (new_qty * new_price)) / total_qty
+
+    position.qty = total_qty
+    position.buy_price = weighted_price
+
+    # record transaction
+    txs = list(position.transactions) if position.transactions else []
+    txs.append({
+        "type": "add",
+        "date": req.trade_date.isoformat(),
+        "qty": new_qty,
+        "price": new_price
+    })
+    position.transactions = txs
+
+    db.commit()
+    db.refresh(position)
+    return position
+
+
+@router.post(
+    "/positions/{position_id}/sell",
+    summary="Partial sell shares from an existing position",
+)
+def partial_sell_position(
+    position_id: int,
+    req: PortfolioPositionSellRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.models.wallet import WalletTrade
+    from datetime import date
+
+    position = (
+        db.query(WalletPosition)
+        .filter(WalletPosition.id == position_id, WalletPosition.user_id == current_user.id)
+        .first()
+    )
+    if not position:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
+
+    old_qty = float(position.qty)
+    sell_qty = req.qty
+
+    if sell_qty > old_qty:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot sell more than held quantity")
+
+    buy_price = float(position.buy_price)
+    realized_pnl = (req.sell_price - buy_price) * sell_qty
+    pnl_pct = realized_pnl / (buy_price * sell_qty) if buy_price * sell_qty > 0 else 0.0
+
+    entry_date = position.entry_date or date.today()
+    days_held = max((req.trade_date - entry_date).days, 0)
+
+    # create a wallet trade for the sold part
+    trade = WalletTrade(
+        user_id=current_user.id,
+        symbol=position.symbol,
+        realized_pnl=realized_pnl,
+        pnl_pct=pnl_pct,
+        days_held=days_held,
+        exit_date=req.trade_date,
+    )
+    db.add(trade)
+
+    if sell_qty == old_qty:
+        db.delete(position)
+        db.commit()
+        return {"message": "Position fully closed", "realized_pnl": realized_pnl, "closed": True}
+    else:
+        position.qty = old_qty - sell_qty
+        txs = list(position.transactions) if position.transactions else []
+        txs.append({
+            "type": "sell",
+            "date": req.trade_date.isoformat(),
+            "qty": sell_qty,
+            "price": req.sell_price,
+            "pnl": realized_pnl
+        })
+        position.transactions = txs
+        db.commit()
+        db.refresh(position)
+        return {"message": "Position partially sold", "realized_pnl": realized_pnl, "closed": False}

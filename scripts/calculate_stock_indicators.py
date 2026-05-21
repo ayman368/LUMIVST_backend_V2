@@ -253,13 +253,17 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
     
     if all_indicators_data:
         try:
-            for indicator_data in all_indicators_data:
+            for i, indicator_data in enumerate(all_indicators_data):
                 stmt = insert(StockIndicator).values(indicator_data)
                 stmt = stmt.on_conflict_do_update(
                     index_elements=['symbol', 'date'],
                     set_={k: v for k, v in indicator_data.items() if k not in ['symbol', 'date', 'created_at']}
                 )
                 db.execute(stmt)
+                
+                # Commit every 50 records to prevent SSL timeout/connection drops on large batches
+                if (i + 1) % 50 == 0:
+                    db.commit()
             
             db.commit()
             successful = len(all_indicators_data)

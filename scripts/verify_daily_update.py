@@ -18,7 +18,7 @@ from app.core.database import SessionLocal
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TARGET_DATE = date(2026, 4, 22)
+TARGET_DATE = date(2026, 5, 20)
 
 def verify_daily_update():
     """
