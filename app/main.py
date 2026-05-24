@@ -169,6 +169,10 @@ async def startup_event():
         print("⚠️ سنتحدث بدون كاش Redis")
     else:
         print("✅ Redis cache initialized successfully")
+        # Pre-warm Minervini trend chart cache in background (no user action needed)
+        from app.services.minervini_cache import schedule_minervini_cache_warm
+        schedule_minervini_cache_warm()
+        print("⏳ Minervini trend cache warming in background...")
     
     # ── Start Scheduler (only if ENABLE_SCHEDULER=true) ──
     from app.core.scheduler import start_scheduler

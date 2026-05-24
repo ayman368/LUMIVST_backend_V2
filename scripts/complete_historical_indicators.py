@@ -45,6 +45,36 @@ def calculate_complete_indicators_for_symbol(symbol: str, df_prices: pd.DataFram
         highs = df_sym['high'].tolist()
         lows = df_sym['low'].tolist()
         opens = df_sym['open'].tolist()
+        
+        # --- PRECALCULATE DAILY MARKET STATISTICS ---
+        df_sym['sma_10'] = df_sym['close'].rolling(10).mean()
+        df_sym['sma_21'] = df_sym['close'].rolling(21).mean()
+        df_sym['sma_50'] = df_sym['close'].rolling(50).mean()
+        df_sym['sma_150'] = df_sym['close'].rolling(150).mean()
+        df_sym['sma_200'] = df_sym['close'].rolling(200).mean()
+
+        df_sym['sma_200_1m_ago'] = df_sym['sma_200'].shift(21)
+        df_sym['sma_200_2m_ago'] = df_sym['sma_200'].shift(42)
+        df_sym['sma_200_3m_ago'] = df_sym['sma_200'].shift(63)
+        df_sym['sma_200_4m_ago'] = df_sym['sma_200'].shift(84)
+        df_sym['sma_200_5m_ago'] = df_sym['sma_200'].shift(105)
+
+        df_sym['fifty_two_week_high'] = df_sym['high'].rolling(252).max()
+        df_sym['fifty_two_week_low'] = df_sym['low'].rolling(252).min()
+        df_sym['average_volume_50'] = df_sym['volume_traded'].rolling(50).mean()
+
+        df_sym['price_vs_sma_10_percent'] = ((df_sym['close'] / df_sym['sma_10']) - 1) * 100
+        df_sym['price_vs_sma_21_percent'] = ((df_sym['close'] / df_sym['sma_21']) - 1) * 100
+        df_sym['price_vs_sma_50_percent'] = ((df_sym['close'] / df_sym['sma_50']) - 1) * 100
+        df_sym['price_vs_sma_150_percent'] = ((df_sym['close'] / df_sym['sma_150']) - 1) * 100
+        df_sym['price_vs_sma_200_percent'] = ((df_sym['close'] / df_sym['sma_200']) - 1) * 100
+
+        df_sym['percent_off_52w_high'] = ((df_sym['close'] / df_sym['fifty_two_week_high']) - 1) * 100
+        df_sym['percent_off_52w_low'] = ((df_sym['close'] / df_sym['fifty_two_week_low']) - 1) * 100
+        df_sym['vol_diff_50_percent'] = ((df_sym['volume_traded'] / df_sym['average_volume_50']) - 1) * 100
+        
+        # Replace infinities with NaN to prevent PostgreSQL Numeric field overflow errors
+        df_sym.replace([np.inf, -np.inf], np.nan, inplace=True)
 
         # --- 1. RSI Components ---
         rsi_components_data = calculate_rsi_components(closes)
@@ -100,7 +130,10 @@ def calculate_complete_indicators_for_symbol(symbol: str, df_prices: pd.DataFram
                 continue
 
             def sf(v): # safe float
-                return round(float(v), 4) if v is not None and not pd.isna(v) else None
+                try:
+                    return round(float(v), 4) if v is not None and not pd.isna(v) and not np.isinf(float(v)) else None
+                except (ValueError, TypeError):
+                    return None
 
             # Trend conditions
             tc = calculate_trend_conditions(trend_components_data, {}, idx, 0, symbol, df_sym)
@@ -173,8 +206,8 @@ def calculate_complete_indicators_for_symbol(symbol: str, df_prices: pd.DataFram
                 'sma_200_3m_ago': sf(row_data.get('sma_200_3m_ago')),
                 'sma_200_4m_ago': sf(row_data.get('sma_200_4m_ago')),
                 'sma_200_5m_ago': sf(row_data.get('sma_200_5m_ago')),
-                'sma_30w': sf(row_data.get('sma_30w')),
-                'sma_40w': sf(row_data.get('sma_40w')),
+                'sma_30w': sf(df_merged.iloc[idx].get('sma_30w')) if 'sma_30w' in df_merged.columns else None,
+                'sma_40w': sf(df_merged.iloc[idx].get('sma_40w')) if 'sma_40w' in df_merged.columns else None,
                 'fifty_two_week_high': sf(row_data.get('fifty_two_week_high')),
                 'fifty_two_week_low': sf(row_data.get('fifty_two_week_low')),
                 'average_volume_50': sf(row_data.get('average_volume_50')),
@@ -277,8 +310,9 @@ def calculate_complete_indicators_for_symbol(symbol: str, df_prices: pd.DataFram
         logger.error(f"❌ Error calculating indicators for {symbol}: {e}")
         return []
 
-def bulk_save_complete_records(records: List[Dict[str, Any]], db_session):
+def bulk_save_complete_records(records: List[Dict[str, Any]]):
     """Save complete records in bulk using ultra-fast COPY with temporary table upsert"""
+    db_session = SessionLocal()
     if not records:
         return 0
 
@@ -331,6 +365,7 @@ def bulk_save_complete_records(records: List[Dict[str, Any]], db_session):
         cursor.execute(f"DROP TABLE {temp_table_name}")
 
         db_session.commit()
+        db_session.close()
         return len(records)
 
     except Exception as e:
@@ -355,10 +390,12 @@ def bulk_save_complete_records(records: List[Dict[str, Any]], db_session):
                 db_session.execute(stmt)
                 total_saved += len(chunk)
             db_session.commit()
+            db_session.close()
             return total_saved
         except Exception as e2:
             logger.error(f"❌ Total failure in saving records: {e2}")
             db_session.rollback()
+            db_session.close()
             return 0
 
 def calculate_complete_historical_ultra_fast(symbols_list: List[str] = None, max_workers: int = 2):
@@ -419,7 +456,7 @@ def calculate_complete_historical_ultra_fast(symbols_list: List[str] = None, max
                 try:
                     records = future.result()
                     if records:
-                        saved = bulk_save_complete_records(records, db)
+                        saved = bulk_save_complete_records(records)
                         total_saved += saved
                         logger.info(f"✅ {symbol}: saved {saved} complete historical days")
                     else:

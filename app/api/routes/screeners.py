@@ -8,15 +8,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc, func, case, literal
 from typing import List, Optional
 from datetime import date
+import asyncio
 import logging
 
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.models.stock_indicators import StockIndicator
 from app.models.rs_daily import RSDaily
 from app.core.cache_helpers import (
     cache_read_through,
     make_screener_key,
-    make_screener_historical_key
 )
 from app.core.cache_config import CACHE_TTL_SCREENERS
 
@@ -518,30 +518,40 @@ async def get_power_play(
 
 
 # ============ HISTORICAL TREND COUNTS (Minervini Trend Chart) ============
-@router.get("/historical-trend")
-async def get_historical_trend(
-    db: Session = Depends(get_db),
-    limit: int = Query(500, ge=1, le=2000),
-):
-    """
-    📈 Historical Trend — Minervini Trend Chart
-    Returns per-date stock counts for 4 screeners:
-      - Trend 1 Month
-      - Trend 4 Months
-      - Trend 5 Months Wide
-      - Alrayan Screener
-    Cached for 24 hours (historical data updates once daily).
-    """
-    cache_key = make_screener_historical_key(limit) + "_v2"
 
-    async def fetch_historical():
-        # ── 1. Trend 5 Months Wide (no RS filter — fastest) ────────────────────
+HISTORICAL_TREND_CACHE_KEY = "screener:historical:trend_v3"
+HISTORICAL_TREND_FULL_LIMIT = 2600  # max trading days (~10Y) — one cache entry for all periods
+HISTORICAL_TREND_CACHE_TTL = 86400  # 24h — data updates once daily
+
+
+def _compute_historical_trend_sync(limit: int) -> dict:
+    """
+    Heavy DB aggregation. Runs in a worker thread so it does not block
+    the asyncio event loop (and other requests like /api/auth/me).
+    """
+    db = SessionLocal()
+    try:
+        date_rows = (
+            db.query(StockIndicator.date)
+            .distinct()
+            .order_by(StockIndicator.date.desc())
+            .limit(limit)
+            .all()
+        )
+        if not date_rows:
+            return {"title": "Minervini Trend", "series": [], "total_dates": 0}
+
+        dates = sorted(r[0] for r in date_rows)
+        date_filter = StockIndicator.date.in_(dates)
+        rs_date_filter = RSDaily.date.in_(dates)
+
         wide_rows = (
             db.query(
                 StockIndicator.date,
                 func.count(StockIndicator.symbol).label("count"),
             )
             .filter(
+                date_filter,
                 and_(
                     StockIndicator.sma_50 > StockIndicator.sma_200,
                     StockIndicator.sma_200 > StockIndicator.sma_200_5m_ago,
@@ -552,7 +562,7 @@ async def get_historical_trend(
                     StockIndicator.close > StockIndicator.sma_30w,
                     StockIndicator.sma_40w.isnot(None),
                     StockIndicator.close > StockIndicator.sma_40w,
-                )
+                ),
             )
             .group_by(StockIndicator.date)
             .order_by(StockIndicator.date)
@@ -560,7 +570,6 @@ async def get_historical_trend(
         )
         wide_map = {str(row.date): int(row.count) for row in wide_rows}
 
-        # ── 2. Trend 1 Month (needs RS > 69 join) ─────────────────────────────
         month1_rows = (
             db.query(
                 StockIndicator.date,
@@ -574,6 +583,8 @@ async def get_historical_trend(
                 ),
             )
             .filter(
+                date_filter,
+                rs_date_filter,
                 and_(
                     RSDaily.rs_rating > 69,
                     StockIndicator.sma_50 > StockIndicator.sma_150,
@@ -589,7 +600,7 @@ async def get_historical_trend(
                     StockIndicator.close > StockIndicator.sma_30w,
                     StockIndicator.sma_40w.isnot(None),
                     StockIndicator.close > StockIndicator.sma_40w,
-                )
+                ),
             )
             .group_by(StockIndicator.date)
             .order_by(StockIndicator.date)
@@ -597,7 +608,6 @@ async def get_historical_trend(
         )
         month1_map = {str(row.date): int(row.count) for row in month1_rows}
 
-        # ── 3. Trend 4 Months (needs RS > 69 join) ────────────────────────────
         month4_rows = (
             db.query(
                 StockIndicator.date,
@@ -611,6 +621,8 @@ async def get_historical_trend(
                 ),
             )
             .filter(
+                date_filter,
+                rs_date_filter,
                 and_(
                     RSDaily.rs_rating > 69,
                     StockIndicator.sma_50 > StockIndicator.sma_150,
@@ -632,7 +644,7 @@ async def get_historical_trend(
                     StockIndicator.close > StockIndicator.sma_30w,
                     StockIndicator.sma_40w.isnot(None),
                     StockIndicator.close > StockIndicator.sma_40w,
-                )
+                ),
             )
             .group_by(StockIndicator.date)
             .order_by(StockIndicator.date)
@@ -640,37 +652,30 @@ async def get_historical_trend(
         )
         month4_map = {str(row.date): int(row.count) for row in month4_rows}
 
-        # ── 4. Alrayan Screener ───────────────────────────────────────────────
         alrayan_rows = (
             db.query(
                 StockIndicator.date,
                 func.count(StockIndicator.symbol).label("count"),
             )
-            .filter(StockIndicator.trend_signal == True)
+            .filter(
+                date_filter,
+                StockIndicator.trend_signal == True,
+            )
             .group_by(StockIndicator.date)
             .order_by(StockIndicator.date)
             .all()
         )
         alrayan_map = {str(row.date): int(row.count) for row in alrayan_rows}
 
-        # ── Merge all dates into a single sorted list ──────────────────────────
-        all_dates = sorted(
-            set(wide_map.keys()) | set(month1_map.keys()) | set(month4_map.keys()) | set(alrayan_map.keys())
-        )
-
-        # Optionally limit to last N data points
-        if limit and len(all_dates) > limit:
-            all_dates = all_dates[-limit:]
-
         series = [
             {
-                "date": d,
-                "trend_1m": month1_map.get(d, 0),
-                "trend_4m": month4_map.get(d, 0),
-                "trend_5m_wide": wide_map.get(d, 0),
-                "alrayan": alrayan_map.get(d, 0),
+                "date": str(d),
+                "trend_1m": month1_map.get(str(d), 0),
+                "trend_4m": month4_map.get(str(d), 0),
+                "trend_5m_wide": wide_map.get(str(d), 0),
+                "alrayan": alrayan_map.get(str(d), 0),
             }
-            for d in all_dates
+            for d in dates
         ]
 
         return {
@@ -678,10 +683,30 @@ async def get_historical_trend(
             "series": series,
             "total_dates": len(series),
         }
+    finally:
+        db.close()
 
-    # Cache for 24 hours (86400s) — historical data updates once daily
-    result = await cache_read_through(cache_key, 86400, fetch_historical)
-    return result
+
+@router.get("/historical-trend")
+async def get_historical_trend(
+    limit: int = Query(1300, ge=1, le=2600),
+):
+    """
+    Historical Trend — Minervini Trend Chart.
+    Full series cached in Redis; `limit` only slices the response.
+    """
+    from app.services.minervini_cache import get_historical_trend_full
+
+    full = await get_historical_trend_full()
+    series = full.get("series") or []
+    if limit < len(series):
+        series = series[-limit:]
+
+    return {
+        "title": full.get("title", "Minervini Trend"),
+        "series": series,
+        "total_dates": len(series),
+    }
 
 
 # ============ HISTORICAL A/D RATING ============

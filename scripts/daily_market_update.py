@@ -331,8 +331,16 @@ def update_daily(target_date_str=None):
         try:
             import asyncio
             from app.core.redis import redis_cache
-            asyncio.run(redis_cache.flush_all())
-            logger.info("🧹 Application caches cleared successfully. New data is now live.")
+            from app.services.minervini_cache import warm_minervini_trend_cache
+
+            async def _refresh_caches():
+                await redis_cache.init_redis()
+                await redis_cache.flush_all()
+                logger.info("🧹 Application caches cleared successfully. New data is now live.")
+                await warm_minervini_trend_cache(force=True)
+                logger.info("✅ Minervini trend cache re-warmed after daily update.")
+
+            asyncio.run(_refresh_caches())
         except Exception as cache_err:
             logger.error(f"⚠️ Failed to invalidate caches: {cache_err}")
 

@@ -175,6 +175,10 @@ class IndicatorsDataService:
         df_weekly['aroon_up_w'] = pd.Series(trend_w_components['aroon_up'], index=df_weekly.index)
         df_weekly['aroon_down_w'] = pd.Series(trend_w_components['aroon_down'], index=df_weekly.index)
         
+        # Minervini specific weekly SMAs (30w and 40w)
+        df_weekly['sma_30w'] = df_weekly['close_w'].rolling(window=30).mean()
+        df_weekly['sma_40w'] = df_weekly['close_w'].rolling(window=40).mean()
+        
         return df_weekly
     
     @staticmethod
@@ -187,7 +191,7 @@ class IndicatorsDataService:
         قيد التشكيل، لذلك نستخدم forward fill لتطبيق قيم الأسبوع على جميع أيام الأسبوع
         """
         # الحصول على أعمدة البيانات الأسبوعية فقط
-        weekly_cols = [col for col in df_weekly.columns if col.endswith('_w')]
+        weekly_cols = [col for col in df_weekly.columns if col.endswith('_w') or col in ('sma_30w', 'sma_40w')]
         
         # إعادة تعيين مؤشر البيانات الأسبوعية ليطابق التواريخ اليومية
         # forward fill يضمن أن كل يوم يحصل على آخر قيمة أسبوعية معروفة
