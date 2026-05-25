@@ -30,6 +30,7 @@ from app.models.naaim_exposure import NaaimExposure
 from app.models.market_pulse import MarketPulse
 from app.models.tasi_settings import TasiSettings
 from app.models.wallet import WalletPosition, WalletTrade, WalletSetting, WalletWeeklyStudy
+from app.models.screener_daily_trend import ScreenerDailyTrend
 
 def create_tables():
     """إنشاء الجداول"""

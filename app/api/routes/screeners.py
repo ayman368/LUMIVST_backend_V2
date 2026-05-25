@@ -4,6 +4,7 @@ Stock Screeners API Endpoints
 """
 
 from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc, func, case, literal
 from typing import List, Optional
@@ -519,18 +520,27 @@ async def get_power_play(
 
 # ============ HISTORICAL TREND COUNTS (Minervini Trend Chart) ============
 
-HISTORICAL_TREND_CACHE_KEY = "screener:historical:trend_v3"
-HISTORICAL_TREND_FULL_LIMIT = 2600  # max trading days (~10Y) — one cache entry for all periods
+HISTORICAL_TREND_CACHE_KEY = "screener:historical:trend_v4"
+HISTORICAL_TREND_COMPUTING_KEY = "screener:historical:trend:computing"
+HISTORICAL_TREND_FULL_LIMIT = 6000  # full history for chart — one Redis entry for all periods
 HISTORICAL_TREND_CACHE_TTL = 86400  # 24h — data updates once daily
 
 
-def _compute_historical_trend_sync(limit: int) -> dict:
+def _compute_historical_trend_sync(limit: int, *, verbose: bool = False) -> dict:
     """
     Heavy DB aggregation. Runs in a worker thread so it does not block
     the asyncio event loop (and other requests like /api/auth/me).
     """
+    import time
+
+    def _log(msg: str) -> None:
+        if verbose:
+            print(msg, flush=True)
+
     db = SessionLocal()
     try:
+        t0 = time.time()
+        _log(f"[historical-trend] Loading last {limit} trading dates...")
         date_rows = (
             db.query(StockIndicator.date)
             .distinct()
@@ -542,16 +552,24 @@ def _compute_historical_trend_sync(limit: int) -> dict:
             return {"title": "Minervini Trend", "series": [], "total_dates": 0}
 
         dates = sorted(r[0] for r in date_rows)
-        date_filter = StockIndicator.date.in_(dates)
-        rs_date_filter = RSDaily.date.in_(dates)
+        recent_dates = (
+            db.query(StockIndicator.date.label("d"))
+            .distinct()
+            .order_by(StockIndicator.date.desc())
+            .limit(limit)
+            .subquery()
+        )
+        on_recent = StockIndicator.date == recent_dates.c.d
+        on_recent_rs = RSDaily.date == recent_dates.c.d
+        _log(f"[historical-trend] Dates ready ({len(dates)} days, {time.time() - t0:.1f}s). Query 1/4: 5M wide...")
 
         wide_rows = (
             db.query(
                 StockIndicator.date,
                 func.count(StockIndicator.symbol).label("count"),
             )
+            .join(recent_dates, on_recent)
             .filter(
-                date_filter,
                 and_(
                     StockIndicator.sma_50 > StockIndicator.sma_200,
                     StockIndicator.sma_200 > StockIndicator.sma_200_5m_ago,
@@ -569,12 +587,14 @@ def _compute_historical_trend_sync(limit: int) -> dict:
             .all()
         )
         wide_map = {str(row.date): int(row.count) for row in wide_rows}
+        _log(f"[historical-trend] Query 1/4 done ({time.time() - t0:.1f}s). Query 2/4: 1M trend (RS join)...")
 
         month1_rows = (
             db.query(
                 StockIndicator.date,
                 func.count(StockIndicator.symbol).label("count"),
             )
+            .join(recent_dates, on_recent)
             .join(
                 RSDaily,
                 and_(
@@ -583,8 +603,7 @@ def _compute_historical_trend_sync(limit: int) -> dict:
                 ),
             )
             .filter(
-                date_filter,
-                rs_date_filter,
+                on_recent_rs,
                 and_(
                     RSDaily.rs_rating > 69,
                     StockIndicator.sma_50 > StockIndicator.sma_150,
@@ -607,12 +626,14 @@ def _compute_historical_trend_sync(limit: int) -> dict:
             .all()
         )
         month1_map = {str(row.date): int(row.count) for row in month1_rows}
+        _log(f"[historical-trend] Query 2/4 done ({time.time() - t0:.1f}s). Query 3/4: 4M trend (RS join)...")
 
         month4_rows = (
             db.query(
                 StockIndicator.date,
                 func.count(StockIndicator.symbol).label("count"),
             )
+            .join(recent_dates, on_recent)
             .join(
                 RSDaily,
                 and_(
@@ -621,8 +642,7 @@ def _compute_historical_trend_sync(limit: int) -> dict:
                 ),
             )
             .filter(
-                date_filter,
-                rs_date_filter,
+                on_recent_rs,
                 and_(
                     RSDaily.rs_rating > 69,
                     StockIndicator.sma_50 > StockIndicator.sma_150,
@@ -651,16 +671,15 @@ def _compute_historical_trend_sync(limit: int) -> dict:
             .all()
         )
         month4_map = {str(row.date): int(row.count) for row in month4_rows}
+        _log(f"[historical-trend] Query 3/4 done ({time.time() - t0:.1f}s). Query 4/4: Alrayan...")
 
         alrayan_rows = (
             db.query(
                 StockIndicator.date,
                 func.count(StockIndicator.symbol).label("count"),
             )
-            .filter(
-                date_filter,
-                StockIndicator.trend_signal == True,
-            )
+            .join(recent_dates, on_recent)
+            .filter(StockIndicator.trend_signal == True)
             .group_by(StockIndicator.date)
             .order_by(StockIndicator.date)
             .all()
@@ -678,6 +697,8 @@ def _compute_historical_trend_sync(limit: int) -> dict:
             for d in dates
         ]
 
+        _log(f"[historical-trend] Complete: {len(series)} points in {time.time() - t0:.1f}s")
+
         return {
             "title": "Minervini Trend",
             "series": series,
@@ -689,20 +710,33 @@ def _compute_historical_trend_sync(limit: int) -> dict:
 
 @router.get("/historical-trend")
 async def get_historical_trend(
-    limit: int = Query(1300, ge=1, le=2600),
+    limit: int = Query(6000, ge=1, le=6000),
 ):
     """
-    Historical Trend — Minervini Trend Chart.
-    Full series cached in Redis; `limit` only slices the response.
+    Historical Trend — reads pre-aggregated table `screener_daily_trend_counts`.
+    Run scripts/backfill_screener_daily_trend.py once if the table is empty.
     """
-    from app.services.minervini_cache import get_historical_trend_full
+    from app.services.minervini_cache import get_historical_trend_cached
 
-    full = await get_historical_trend_full()
+    full = await get_historical_trend_cached(limit)
+    if full is None or not full.get("series"):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "title": "Minervini Trend",
+                "series": [],
+                "total_dates": 0,
+                "message": (
+                    "Historical trend data is not loaded yet. "
+                    "Run: python scripts/backfill_screener_daily_trend.py"
+                ),
+            },
+        )
+
     series = full.get("series") or []
-    if limit < len(series):
-        series = series[-limit:]
-
     return {
+        "status": "ready",
         "title": full.get("title", "Minervini Trend"),
         "series": series,
         "total_dates": len(series),

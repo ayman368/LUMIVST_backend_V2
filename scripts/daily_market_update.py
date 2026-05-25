@@ -309,6 +309,14 @@ def update_daily(target_date_str=None):
         
         processed, errors, successful = calculate_and_store_indicators(db, market_date, tech_map=tech_map)
         logger.info(f"✅ Stock Indicators Updated (Processed: {processed}, Successful: {successful}, Errors: {errors})")
+
+        # 8.1 Pre-aggregate Minervini trend counts for this date (fast chart API reads)
+        try:
+            from app.services.screener_daily_trend_service import update_market_date
+            update_market_date(db, market_date)
+            logger.info("✅ Screener daily trend row updated for chart API.")
+        except Exception as trend_err:
+            logger.error(f"⚠️ Screener daily trend update failed: {trend_err}")
         
         # 8.5 Calculate Daily Market Breadth — ATOMIC
         # -------------------------------------------------------------------
@@ -331,16 +339,8 @@ def update_daily(target_date_str=None):
         try:
             import asyncio
             from app.core.redis import redis_cache
-            from app.services.minervini_cache import warm_minervini_trend_cache
-
-            async def _refresh_caches():
-                await redis_cache.init_redis()
-                await redis_cache.flush_all()
-                logger.info("🧹 Application caches cleared successfully. New data is now live.")
-                await warm_minervini_trend_cache(force=True)
-                logger.info("✅ Minervini trend cache re-warmed after daily update.")
-
-            asyncio.run(_refresh_caches())
+            asyncio.run(redis_cache.flush_all())
+            logger.info("🧹 Application caches cleared successfully. New data is now live.")
         except Exception as cache_err:
             logger.error(f"⚠️ Failed to invalidate caches: {cache_err}")
 

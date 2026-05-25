@@ -1,77 +1,49 @@
 """
-Minervini historical-trend cache — warmed automatically on server startup
-and after the daily market update. No manual script required for users.
+Redis cache layer on top of pre-aggregated DB table `screener_daily_trend_counts`.
+No heavy SQL on API requests — run scripts/backfill_screener_daily_trend.py once for history.
 """
 import asyncio
 import logging
 
+from app.core.database import SessionLocal
 from app.core.redis import redis_cache
-from app.api.routes.screeners import (
-    HISTORICAL_TREND_CACHE_KEY,
-    HISTORICAL_TREND_CACHE_TTL,
-    HISTORICAL_TREND_FULL_LIMIT,
-    _compute_historical_trend_sync,
-)
+from app.services.screener_daily_trend_service import build_payload, row_count
 
 logger = logging.getLogger(__name__)
-_compute_lock = asyncio.Lock()
+
+HISTORICAL_TREND_CACHE_KEY = "screener:historical:trend_v5"
+HISTORICAL_TREND_CACHE_TTL = 86400
 
 
-async def get_historical_trend_full() -> dict:
-    """Return full cached series; compute once if missing (deduplicated)."""
+def _load_from_db(limit: int) -> dict:
+    db = SessionLocal()
+    try:
+        if row_count(db) == 0:
+            return {"title": "Minervini Trend", "series": [], "total_dates": 0}
+        return build_payload(db, limit)
+    finally:
+        db.close()
+
+
+async def get_historical_trend_cached(limit: int = 6000) -> dict | None:
+    """Fast path: Redis → PostgreSQL aggregate table."""
     cached = await redis_cache.get(HISTORICAL_TREND_CACHE_KEY)
     if cached is not None:
+        series = cached.get("series") or []
+        if limit < len(series):
+            cached = {**cached, "series": series[-limit:], "total_dates": limit}
         return cached
 
-    async with _compute_lock:
-        cached = await redis_cache.get(HISTORICAL_TREND_CACHE_KEY)
-        if cached is not None:
-            return cached
+    data = await asyncio.to_thread(_load_from_db, limit)
+    if not data.get("series"):
+        return None
 
-        logger.info("Minervini trend cache miss — computing in background thread")
-        data = await asyncio.to_thread(
-            _compute_historical_trend_sync, HISTORICAL_TREND_FULL_LIMIT
-        )
-        await redis_cache.set(
-            HISTORICAL_TREND_CACHE_KEY, data, expire=HISTORICAL_TREND_CACHE_TTL
-        )
-        logger.info(
-            "Minervini trend cache stored (%s dates)",
-            data.get("total_dates", 0),
-        )
+    full = await asyncio.to_thread(_load_from_db, 6000)
+    await redis_cache.set(HISTORICAL_TREND_CACHE_KEY, full, expire=HISTORICAL_TREND_CACHE_TTL)
+    if limit < len(data.get("series") or []):
         return data
+    return full
 
 
-async def warm_minervini_trend_cache(*, force: bool = False) -> bool:
-    """
-    Pre-populate Redis. Skips if already cached unless force=True.
-    Safe to call from startup, cron, or optional dev script.
-    """
-    if not force:
-        existing = await redis_cache.get(HISTORICAL_TREND_CACHE_KEY)
-        if existing is not None:
-            return True
-
-    async with _compute_lock:
-        if not force:
-            existing = await redis_cache.get(HISTORICAL_TREND_CACHE_KEY)
-            if existing is not None:
-                return True
-
-        logger.info("Warming Minervini historical-trend cache...")
-        data = await asyncio.to_thread(
-            _compute_historical_trend_sync, HISTORICAL_TREND_FULL_LIMIT
-        )
-        await redis_cache.set(
-            HISTORICAL_TREND_CACHE_KEY, data, expire=HISTORICAL_TREND_CACHE_TTL
-        )
-        logger.info(
-            "Minervini trend cache warm complete (%s dates)",
-            data.get("total_dates", 0),
-        )
-        return True
-
-
-def schedule_minervini_cache_warm() -> None:
-    """Fire-and-forget warm after API startup (does not block requests)."""
-    asyncio.create_task(warm_minervini_trend_cache())
+async def invalidate_historical_trend_cache() -> None:
+    await redis_cache.delete(HISTORICAL_TREND_CACHE_KEY)

@@ -64,7 +64,7 @@ def _get_or_seed(db: Session) -> TasiSettings:
 
 # ── GET /api/tasi-settings ──────────────────────────────────────────────────
 @router.get(
-    "/",
+    "",
     response_model=TasiSettingsRead,
     summary="Get current TASI market settings",
 )
@@ -74,7 +74,7 @@ def get_settings(db: Session = Depends(get_db)):
 
 # ── POST /api/tasi-settings ─────────────────────────────────────────────────
 @router.post(
-    "/",
+    "",
     response_model=TasiSettingsRead,
     summary="Update TASI market settings",
 )
