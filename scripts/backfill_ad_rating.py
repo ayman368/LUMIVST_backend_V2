@@ -1,13 +1,22 @@
 """
 backfill_ad_rating.py
 =====================
-حساب تقييم A/D Rating تاريخياً (10 سنوات) وتحديثه في rs_daily_v2.
+حساب تقييم A/D Rating تاريخياً وتحديثه في rs_daily_v2.
+
+الافتراضي: من 2002 (مثل market breadth) — يحتاج ~63 يوم أسعار قبل أول تاريخ إخراج.
 
 ⚠️  هذا الاسكريبت آمن تماماً:
     - لا يمسح أي بيانات من الجدول الرئيسي
     - يستخدم Temp Table + UPDATE لعمود acc_dis_rating فقط
     - حتى لو فشل في أي خطوة، البيانات الأصلية تبقى سليمة
+
+بعد التشغيل: امسح كاش Redis (market_breadth:ad_rating:* و screener:historical:ad_rating_*)
+أو انتظر انتهاء TTL (~1 ساعة).
 """
+
+# أقدم تاريخ في شارتات market breadth؛ نحمّل أسعاراً قبله لنافذة 63 يوم
+OUTPUT_FROM = "2002-01-01"
+PRICE_LOAD_FROM = "2001-09-01"
 
 import sys
 import time
@@ -52,15 +61,15 @@ def get_pg_connection():
 
 
 def main():
-    print("🚀 Starting 10-Year A/D Rating Backfill (SAFE mode)...")
+    print(f"🚀 Starting A/D Rating Backfill from {OUTPUT_FROM} (SAFE mode)...")
     start_time = time.time()
 
     # ── Step 1: Load price data ──────────────────────────────────────────
-    print("\n[1/5] 📥 Loading prices (Since 2013-09)...")
+    print(f"\n[1/5] 📥 Loading prices (since {PRICE_LOAD_FROM} for 63d warmup)...")
     pg_conn = get_pg_connection()
     df = pd.read_sql(
         "SELECT symbol, date, close, high, low, volume_traded "
-        "FROM prices WHERE date >= '2013-09-01' ORDER BY symbol, date ASC",
+        f"FROM prices WHERE date >= '{PRICE_LOAD_FROM}' ORDER BY symbol, date ASC",
         pg_conn
     )
     print(f"      📊 Loaded {len(df):,} price records.")
@@ -93,8 +102,7 @@ def main():
     valid['percentile'] = valid.groupby('date')['mfv_13w'].rank(pct=True) * 100
     valid['grade'] = get_letter_grades_series(valid['percentile'])
 
-    # Keep only dates from 2014 onwards
-    valid = valid[valid['date'] >= '2014-01-01']
+    valid = valid[valid['date'] >= OUTPUT_FROM]
     print(f"      ✅ Calculated {len(valid):,} A/D ratings.")
 
     # ── Step 4: Prepare data for upload ──────────────────────────────────

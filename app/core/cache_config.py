@@ -8,25 +8,25 @@ Single source of truth for all cache TTLs
 # ============================================================================
 
 # RS Latest / RS V2 Latest / Screeners / Technical Screener
-CACHE_TTL_SCREENERS = 600  # 10 minutes
+CACHE_TTL_SCREENERS = 86400  # 24 hours
 
 # Prices Latest
-CACHE_TTL_PRICES_LATEST = 300  # 5 minutes
+CACHE_TTL_PRICES_LATEST = 86400  # 24 hours
 
 # Prices History by Symbol
-CACHE_TTL_PRICES_HISTORY = 3600  # 60 minutes
+CACHE_TTL_PRICES_HISTORY = 86400  # 24 hours
 
 # RS History and RS V2 History
-CACHE_TTL_RS_HISTORY = 1800  # 30 minutes
+CACHE_TTL_RS_HISTORY = 86400  # 24 hours
 
 # Industry Groups Latest
-CACHE_TTL_INDUSTRY_GROUPS_LATEST = 900  # 15 minutes
+CACHE_TTL_INDUSTRY_GROUPS_LATEST = 86400  # 24 hours
 
 # Industry Groups Stocks
-CACHE_TTL_INDUSTRY_GROUPS_STOCKS = 1200  # 20 minutes
+CACHE_TTL_INDUSTRY_GROUPS_STOCKS = 86400  # 24 hours
 
 # RS V2 Stats / RS V2 Industries / RS V2 Top-Movers
-CACHE_TTL_RS_V2_STATS = 600  # 10 minutes
+CACHE_TTL_RS_V2_STATS = 86400  # 24 hours
 
 # ============================================================================
 # Cache Key Prefixes (Namespace Organization)

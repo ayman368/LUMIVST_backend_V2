@@ -14,4 +14,5 @@ class ScreenerDailyTrend(Base):
     trend_4m = Column(Integer, nullable=False, default=0)
     trend_5m_wide = Column(Integer, nullable=False, default=0)
     alrayan = Column(Integer, nullable=False, default=0)
+    alhussain = Column(Integer, nullable=False, default=0)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, desc, func, case, literal
 from typing import List, Optional
-from datetime import date
+from datetime import date, timedelta
 import asyncio
 import logging
 
@@ -747,14 +747,16 @@ async def get_historical_trend(
 @router.get("/historical-ad-rating")
 async def get_historical_ad_rating(
     db: Session = Depends(get_db),
-    limit: int = Query(500, ge=1, le=5000),
+    limit: int = Query(5000, ge=1, le=5000),
+    period: str = Query("ALL", description="5D, 1M, 6M, 1Y, 5Y, 10Y, ALL"),
 ):
     """
     📈 Historical A/D Rating
-    Returns per-date stock counts for A/D Rating 'A' and 'D'.
+    Returns per-date stock counts AND percentages for A/D Rating 'A' and 'D'.
+    Percentages normalize for market growth (total listed stocks).
     Cached for 1 hour.
     """
-    cache_key = f"screener:historical:ad_rating_v2:limit:{limit}"
+    cache_key = f"screener:historical:ad_rating_v3:limit:{limit}"
 
     async def fetch_historical():
         # Count A ratings
@@ -783,16 +785,50 @@ async def get_historical_ad_rating(
         )
         d_map = {str(row.date): int(row.count) for row in d_rows}
 
+        # Count total stocks with acc_dis_rating per date (for percentage)
+        total_rows = (
+            db.query(
+                RSDaily.date,
+                func.count(RSDaily.symbol).label("count"),
+            )
+            .filter(RSDaily.acc_dis_rating.isnot(None))
+            .group_by(RSDaily.date)
+            .order_by(RSDaily.date)
+            .all()
+        )
+        total_map = {str(row.date): int(row.count) for row in total_rows}
+
         all_dates = sorted(set(a_map.keys()) | set(d_map.keys()))
 
         if limit and len(all_dates) > limit:
             all_dates = all_dates[-limit:]
+
+        period_upper = period.upper()
+        period_start = None
+        if period_upper == "5D":
+            period_start = date.today() - timedelta(days=7)
+        elif period_upper == "1M":
+            period_start = date.today() - timedelta(days=30)
+        elif period_upper == "6M":
+            period_start = date.today() - timedelta(days=180)
+        elif period_upper == "1Y":
+            period_start = date.today() - timedelta(days=365)
+        elif period_upper == "5Y":
+            period_start = date.today() - timedelta(days=365 * 5)
+        elif period_upper == "10Y":
+            period_start = date.today() - timedelta(days=365 * 10)
+
+        if period_start:
+            all_dates = [d for d in all_dates if date.fromisoformat(d[:10]) >= period_start]
 
         series = [
             {
                 "date": d,
                 "a_rating": a_map.get(d, 0),
                 "d_rating": d_map.get(d, 0),
+                "total_stocks": total_map.get(d, 1),
+                "a_rating_pct": round(a_map.get(d, 0) / max(total_map.get(d, 1), 1) * 100, 2),
+                "d_rating_pct": round(d_map.get(d, 0) / max(total_map.get(d, 1), 1) * 100, 2),
             }
             for d in all_dates
         ]

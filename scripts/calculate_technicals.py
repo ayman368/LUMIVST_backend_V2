@@ -58,6 +58,7 @@ class TechnicalCalculator:
             # Power Play columns
             'percent_change_15d':   'NUMERIC(14, 4)',
             'percent_change_20d':   'NUMERIC(14, 4)',
+            'percent_change_63d':   'NUMERIC(14, 4)',
             'percent_change_126d':  'NUMERIC(14, 4)',
             'beta':                 'NUMERIC(12, 4)',
         }
@@ -123,12 +124,15 @@ class TechnicalCalculator:
         df['change'] = grouped['close'].transform(lambda x: x.diff())
 
         # 4b. Power Play: حساب التغيرات المطلوبة
-        logger.info("   ... حساب percent_change_20d و percent_change_15d و percent_change_126d")
+        logger.info("   ... حساب percent_change_20d و percent_change_15d و percent_change_63d و percent_change_126d")
         df['percent_change_15d'] = grouped['close'].transform(
             lambda x: ((x - x.shift(15)) / x.shift(15).replace(0, np.nan)) * 100
         )
         df['percent_change_20d'] = grouped['close'].transform(
             lambda x: ((x - x.shift(20)) / x.shift(20).replace(0, np.nan)) * 100
+        )
+        df['percent_change_63d'] = grouped['close'].transform(
+            lambda x: ((x - x.shift(63)) / x.shift(63).replace(0, np.nan)) * 100
         )
         df['percent_change_126d'] = grouped['close'].transform(
             lambda x: ((x - x.shift(126)) / x.shift(126).replace(0, np.nan)) * 100
@@ -339,6 +343,7 @@ class TechnicalCalculator:
                         'vol_diff':     fv('vol_diff_50_percent'),
                         'pct_chg_15d':  fv('percent_change_15d'),
                         'pct_chg_20d':  fv('percent_change_20d'),
+                        'pct_chg_63d':  fv('percent_change_63d'),
                         'pct_chg_126d': fv('percent_change_126d'),
                         'beta':         fv('beta'),
                     }
@@ -355,7 +360,7 @@ class TechnicalCalculator:
                             price_vs_sma_10_percent, price_vs_sma_21_percent, price_vs_sma_50_percent,
                             price_vs_sma_150_percent, price_vs_sma_200_percent,
                             percent_off_52w_high, percent_off_52w_low, vol_diff_50_percent,
-                            percent_change_15d, percent_change_20d, percent_change_126d, beta
+                            percent_change_15d, percent_change_20d, percent_change_63d, percent_change_126d, beta
                         ) VALUES (
                             :symbol, :date,
                             :sma_10, :sma_21, :sma_50, :sma_150, :sma_200,
@@ -365,7 +370,7 @@ class TechnicalCalculator:
                             :pm10, :pm21, :pm50, :pm150, :pm200,
                             :p10_pct, :p21_pct, :p50_pct, :p150_pct, :p200_pct,
                             :pct_off_high, :pct_off_low, :vol_diff,
-                            :pct_chg_15d, :pct_chg_20d, :pct_chg_126d, :beta
+                            :pct_chg_15d, :pct_chg_20d, :pct_chg_63d, :pct_chg_126d, :beta
                         )
                         ON CONFLICT (symbol, date) DO UPDATE SET
                             sma_10  = EXCLUDED.sma_10,
@@ -398,6 +403,7 @@ class TechnicalCalculator:
                             vol_diff_50_percent  = EXCLUDED.vol_diff_50_percent,
                             percent_change_15d   = EXCLUDED.percent_change_15d,
                             percent_change_20d   = EXCLUDED.percent_change_20d,
+                            percent_change_63d   = EXCLUDED.percent_change_63d,
                             percent_change_126d  = EXCLUDED.percent_change_126d,
                             beta                 = EXCLUDED.beta
                     """), si_params)
@@ -495,6 +501,7 @@ class TechnicalCalculator:
                 'vol_diff_50_percent': fv('vol_diff_50_percent'),
                 'percent_change_15d': fv('percent_change_15d'),
                 'percent_change_20d': fv('percent_change_20d'),
+                'percent_change_63d': fv('percent_change_63d'),
                 'percent_change_126d': fv('percent_change_126d'),
                 'beta': fv('beta'),
             }

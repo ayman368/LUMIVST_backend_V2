@@ -278,7 +278,7 @@ def calculate_rbaf(inp: RBAFInputs) -> RBAFResult:
         trades_to_reach_goal=trades_to_goal,
         adjusted_gain_loss_ratio=adjusted_gain_loss_ratio,
         optimal_f=optimal_f,
-        stop_loss=inp.avg_pct_loss,
+        stop_loss=(inp.risk_of_rote / inp.portfolio_pct) if inp.portfolio_pct else 0.0,
         monthly_trades_to_goal=monthly_trades_to_goal,
         quarter_position_sar=quarter_pos_sar,
         half_position_sar=half_pos_sar,

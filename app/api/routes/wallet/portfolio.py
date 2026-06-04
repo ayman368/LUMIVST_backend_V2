@@ -15,6 +15,8 @@ from app.schemas.wallet import (
 from app.models.wallet import WalletPosition
 from app.models.price import Price
 from app.models.stock_indicators import StockIndicator
+from app.models.market_reports import NetShortPosition
+from app.models.static_stock_info import StaticStockInfo
 from app.models.user import User
 from app.core.database import get_db
 from app.api.deps import get_current_user
@@ -50,9 +52,26 @@ def list_positions(
             StockIndicator.symbol == pos.symbol
         ).order_by(StockIndicator.date.desc()).first()
 
+        # Latest short position record
+        latest_short = db.query(NetShortPosition).filter(
+            NetShortPosition.symbol == pos.symbol
+        ).order_by(NetShortPosition.report_date.desc()).first()
+
+        # Static info (including marginable_percent)
+        static_info = db.query(StaticStockInfo).filter(
+            StaticStockInfo.symbol == pos.symbol
+        ).first()
+
         current_price = float(latest_price.close) if latest_price else float(pos.buy_price)
         prev_close = float(latest_price.open) if latest_price and latest_price.open else current_price
         change_pct = float(latest_price.change_percent) / 100 if latest_price and latest_price.change_percent else 0.0
+
+        # Get marginable_percent from StaticStockInfo (if available), otherwise from prices table
+        marginable_percent = None
+        if static_info and static_info.marginable_percent:
+            marginable_percent = float(static_info.marginable_percent)
+        elif latest_price and latest_price.marginable_percent:
+            marginable_percent = float(latest_price.marginable_percent)
 
         pos_dict = {
             "id": pos.id,
@@ -70,9 +89,11 @@ def list_positions(
             "sector": latest_price.sector if latest_price else None,
             "industry_group": latest_price.industry_group if latest_price else None,
             "change_percent": change_pct,
-            "marginable_percent": float(latest_price.marginable_percent) if latest_price and latest_price.marginable_percent else None,
+            "marginable_percent": marginable_percent,
+            "short_percent": float(latest_short.percent_over_free_float) if latest_short and latest_short.percent_over_free_float else None,
             # Enriched from stock_indicators table
             "percent_change_20d": float(latest_ind.percent_change_20d) if latest_ind and latest_ind.percent_change_20d else None,
+            "percent_change_63d": float(latest_ind.percent_change_63d) if latest_ind and latest_ind.percent_change_63d else None,
             "percent_change_126d": float(latest_ind.percent_change_126d) if latest_ind and latest_ind.percent_change_126d else None,
             "percent_change_15d": float(latest_ind.percent_change_15d) if latest_ind and latest_ind.percent_change_15d else None,
             "sma_150": float(latest_ind.sma_150) if latest_ind and latest_ind.sma_150 else None,
