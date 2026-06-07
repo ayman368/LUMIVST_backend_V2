@@ -129,16 +129,18 @@ class IBDMetricsCalculator:
             # Apply Grading
             group_perf['grade'] = group_perf['percentile'].apply(self.get_letter_grade)
             
-            # Map back to symbols
-            # We create a dictionary: { 'Software': 'A+', 'Banks': 'C', ... }
+            # Map grade back to each symbol — vectorized (no iterrows)
             grade_map = dict(zip(group_perf[col], group_perf['grade']))
-            
-            # Store in results
-            for idx, row in valid_groups.iterrows():
-                sym = row['symbol']
-                grp = row[col]
-                if sym not in results: results[sym] = {}
-                results[sym][result_col] = grade_map.get(grp, None)
+
+            # Map back to symbols — fully vectorized with zip (أسرع من iterrows)
+            sym_grade_df = valid_groups[['symbol', col]].copy()
+            sym_grade_df['grade'] = sym_grade_df[col].map(grade_map)
+            sym_grade_df = sym_grade_df.dropna(subset=['grade'])
+
+            for sym, grade in zip(sym_grade_df['symbol'], sym_grade_df['grade']):
+                if sym not in results:
+                    results[sym] = {}
+                results[sym][result_col] = grade
 
         return results
 

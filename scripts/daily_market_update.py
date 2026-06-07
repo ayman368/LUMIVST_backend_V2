@@ -1,4 +1,5 @@
 import sys
+import gc
 from pathlib import Path
 import csv
 import traceback
@@ -11,7 +12,6 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.dialects.postgresql import insert
-import sys
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -207,22 +207,34 @@ def update_daily(target_date_str=None):
             
         db.commit()
         logger.info(f"✅ Successfully saved/updated {success_count} price records for {market_date}.")
+
+        # 🧹 Free memory after saving prices
+        del scraped_data, hierarchy_map
+        gc.collect()
         
         # 4. RS Calculation (Optimized Final) — CALCULATE ONLY, DO NOT SAVE YET
         # -------------------------------------------------------------------
         logger.info(f"🧮 Starting RS Calculation for {market_date} (Daily Single-Day Mode)...")
         from scripts.calculate_rs_final_precise import RSCalculatorUltraFast
         import pandas as pd
-        
-        calculator = RSCalculatorUltraFast(str(settings.DATABASE_URL))
-        results = calculator.calculate_daily_rs_ultrafast(market_date)
+
+        # تعريف defaults أولاً يضمن إن الـ del في النهاية آمن حتى لو حصل exception
+        calculator = None
         df_rs_today = None
-        
-        if results and len(results) > 0:
-            df_rs_today = pd.DataFrame(results)
-            logger.info(f"✅ Calculated RS for {len(df_rs_today)} stocks (held in memory, not saved yet).")
-        else:
-            logger.warning(f"⚠️ No RS results found for {market_date}.")
+
+        try:
+            calculator = RSCalculatorUltraFast(str(settings.DATABASE_URL))
+            results = calculator.calculate_daily_rs_ultrafast(market_date)
+            if results and len(results) > 0:
+                df_rs_today = pd.DataFrame(results)
+                logger.info(f"✅ Calculated RS for {len(df_rs_today)} stocks (held in memory, not saved yet).")
+            else:
+                logger.warning(f"⚠️ No RS results found for {market_date}.")
+            del results
+        except Exception as rs_err:
+            logger.error(f"⚠️ RS Calculation failed (will skip RS+IBD save): {rs_err}")
+
+        gc.collect()
             
         # 5. Calculate Technical Indicators — ATOMIC: only save prices.change, keep tech data in memory
         # -------------------------------------------------------------------
@@ -235,6 +247,10 @@ def update_daily(target_date_str=None):
         tech_map = tech_calc.save_change_only_and_return_tech_map(df_tech_res)
         logger.info(f"✅ Technical Indicators calculated (held in memory: {len(tech_map)} stocks).")
 
+        # 🧹 Free memory: release raw technical DataFrames, keep only tech_map dict
+        del df_tech, df_tech_res, tech_calc
+        gc.collect()
+
         # 6. Calculate IBD Metrics (Group RS, Acc/Dis) — CALCULATE ONLY
         # -------------------------------------------------------------------
         logger.info("📊 Calculating IBD Metrics (Group RS, Acc/Dis)...")
@@ -243,6 +259,7 @@ def update_daily(target_date_str=None):
         ibd_calc = IBDMetricsCalculator(db)
         df_ibd_prices = ibd_calc.load_data(lookback_days=230)
         
+        # تعريف defaults هنا يضمن إن الـ del بعدين آمن حتى لو حصل exception
         group_rs_map = {}
         acc_dis_map = {}
         
@@ -253,25 +270,30 @@ def update_daily(target_date_str=None):
         else:
             logger.warning("⚠️ No price data found for IBD Metrics.")
 
+        # 🧹 Free memory: release the large IBD prices DataFrame
+        del df_ibd_prices, ibd_calc
+        gc.collect()
+
         # 6.5 ATOMIC SAVE: Merge RS + IBD → Save to rs_daily_v2 in ONE shot
         # -------------------------------------------------------------------
-        if df_rs_today is not None and len(df_rs_today) > 0:
+        if df_rs_today is not None and len(df_rs_today) > 0 and calculator is not None:
             logger.info("💾 Merging RS + IBD data and saving atomically to rs_daily_v2...")
-            
-            # Add IBD columns to the RS DataFrame before saving
-            for idx, row in df_rs_today.iterrows():
-                sym = row.get('symbol')
-                if sym:
-                    grp = group_rs_map.get(sym, {})
-                    df_rs_today.at[idx, 'sector_rs_rating'] = grp.get('sector_rs_rating')
-                    df_rs_today.at[idx, 'industry_group_rs_rating'] = grp.get('industry_group_rs_rating')
-                    df_rs_today.at[idx, 'industry_rs_rating'] = grp.get('industry_rs_rating')
-                    df_rs_today.at[idx, 'sub_industry_rs_rating'] = grp.get('sub_industry_rs_rating')
-                    df_rs_today.at[idx, 'acc_dis_rating'] = acc_dis_map.get(sym)
-            
+
+            # Vectorized merge — بدل iterrows + .at[] على كل سهم
+            df_rs_today['sector_rs_rating']         = df_rs_today['symbol'].map(lambda s: group_rs_map.get(s, {}).get('sector_rs_rating'))
+            df_rs_today['industry_group_rs_rating'] = df_rs_today['symbol'].map(lambda s: group_rs_map.get(s, {}).get('industry_group_rs_rating'))
+            df_rs_today['industry_rs_rating']       = df_rs_today['symbol'].map(lambda s: group_rs_map.get(s, {}).get('industry_rs_rating'))
+            df_rs_today['sub_industry_rs_rating']   = df_rs_today['symbol'].map(lambda s: group_rs_map.get(s, {}).get('sub_industry_rs_rating'))
+            df_rs_today['acc_dis_rating']           = df_rs_today['symbol'].map(acc_dis_map)
+
             # Now save everything at once — the row is COMPLETE from the start
             calculator.save_bulk_results_with_ibd(df_rs_today)
             logger.info(f"✅ RS + IBD Data saved atomically for {market_date} ({len(df_rs_today)} stocks).")
+
+        # 🧹 Free memory: RS, IBD maps, and calculator no longer needed
+        # (كلهم معرّفين بـ defaults فوق، فالـ del آمن دايماً)
+        del df_rs_today, group_rs_map, acc_dis_map, calculator
+        gc.collect()
 
         # 7. Calculate Industry Group Metrics
         # -------------------------------------------------------------------
@@ -301,14 +323,53 @@ def update_daily(target_date_str=None):
                 logger.warning("⚠️ No IBD scores calculated for Industry Groups.")
         else:
             logger.warning("⚠️ No group indices found for Industry Group Metrics calculation.")
+
+        # 🧹 Free memory: industry group objects no longer needed
+        del ig_calc
+        gc.collect()
         
-        # 8. Calculate and Store Stock Technical Indicators — ATOMIC with tech_map
+        # 8. Calculate and Store Stock Technical Indicators — BATCHED (2 × ~140 stocks)
         # -------------------------------------------------------------------
-        logger.info("📈 Calculating and Storing Stock Technical Indicators (with merged SMAs)...")
+        logger.info("📈 Calculating and Storing Stock Technical Indicators (Batched Mode)...")
         from scripts.calculate_stock_indicators import calculate_and_store_indicators
-        
-        processed, errors, successful = calculate_and_store_indicators(db, market_date, tech_map=tech_map)
-        logger.info(f"✅ Stock Indicators Updated (Processed: {processed}, Successful: {successful}, Errors: {errors})")
+
+        BATCH_SIZE = 140
+        all_symbols = list(tech_map.keys())
+        total_processed = total_errors = total_successful = 0
+
+        for batch_num, batch_start in enumerate(range(0, len(all_symbols), BATCH_SIZE), start=1):
+            batch_symbols = all_symbols[batch_start : batch_start + BATCH_SIZE]
+            batch_tech_map = {sym: tech_map[sym] for sym in batch_symbols}
+
+            logger.info(
+                f"  ⚙️  Batch {batch_num}: symbols {batch_start + 1}–"
+                f"{batch_start + len(batch_symbols)} ({len(batch_symbols)} stocks)..."
+            )
+
+            b_processed, b_errors, b_successful = calculate_and_store_indicators(
+                db, market_date, tech_map=batch_tech_map
+            )
+            total_processed  += b_processed
+            total_errors     += b_errors
+            total_successful += b_successful
+
+            logger.info(
+                f"  ✅ Batch {batch_num} done — "
+                f"Processed: {b_processed}, Successful: {b_successful}, Errors: {b_errors}"
+            )
+
+            # 🧹 Free this batch from memory before loading the next one
+            del batch_tech_map, batch_symbols
+            gc.collect()
+
+        logger.info(
+            f"✅ Stock Indicators Updated — Total: "
+            f"Processed: {total_processed}, Successful: {total_successful}, Errors: {total_errors}"
+        )
+
+        # 🧹 Free memory: full tech_map no longer needed
+        del tech_map, all_symbols
+        gc.collect()
 
         # 8.1 Pre-aggregate Minervini trend counts for this date (fast chart API reads)
         try:

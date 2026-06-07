@@ -9,11 +9,9 @@ import sys
 import gc
 import os
 import psutil
-from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import OperationalError
-import gc
 import psycopg2
 import csv
+from sqlalchemy.pool import QueuePool
 from io import StringIO
 from pathlib import Path
 
@@ -363,30 +361,15 @@ class RSCalculatorUltraFast:
             # 4. Cleanup and Formatting
             # Fill NaN with -1 for integer conversion then replace with None
             df['rs_rating'] = df['rs_rating'].fillna(-1).astype(int).replace({-1: None})
-            
-            # 5. Prepare results
-            results = []
-            for _, row in df.iterrows():
-                results.append({
-                    'symbol': str(row['symbol']),
-                    'date': row['date'],
-                    'current_price': float(row['current_price']),
-                    'return_1m': float(row['return_1m']),
-                    'return_3m': float(row['return_3m']),
-                    'return_6m': float(row['return_6m']),
-                    'return_9m': float(row['return_9m']),
-                    'return_12m': float(row['return_12m']),
-                    'rs_raw': float(row['rs_raw']),
-                    'rs_rating': int(row['rs_rating']) if row.get('rs_rating') is not None else None,
-                    'rank_1m': int(row['rank_1m']) if row.get('rank_1m') is not None else None,
-                    'rank_3m': int(row['rank_3m']) if row.get('rank_3m') is not None else None,
-                    'rank_6m': int(row['rank_6m']) if row.get('rank_6m') is not None else None,
-                    'rank_9m': int(row['rank_9m']) if row.get('rank_9m') is not None else None,
-                    'rank_12m': int(row['rank_12m']) if row.get('rank_12m') is not None else None,
-                    'company_name': str(row['company_name']),
-                    'industry_group': str(row['industry_group']),
-                    'has_complete_data': not np.isnan(row['rs_raw'])
-                })
+
+            # 5. Prepare results — vectorized (no iterrows)
+            df['has_complete_data'] = ~np.isnan(df['rs_raw'].astype(float))
+
+            # Convert nullable int columns safely
+            for int_col in ['rs_rating', 'rank_1m', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m']:
+                df[int_col] = pd.array(df[int_col], dtype=pd.Int64Dtype())
+
+            results = df.to_dict('records')
             
             return results
             
@@ -474,7 +457,7 @@ class RSCalculatorUltraFast:
         return self._save_bulk(df)
 
 
-    def setup_table(self):
+    def setup_table_v2(self):
         """Setup V2 table with retry using explicit transaction"""
         try:
             with self.engine.begin() as conn:
@@ -560,7 +543,7 @@ class RSCalculatorUltraFast:
         print(f"📊 Remaining Days: {remaining_days:,}")
         
         # Create table if doesn't exist
-        self.setup_table()
+        self.setup_table_v2()
         
         start_time = time.time()
         total_saved = 0

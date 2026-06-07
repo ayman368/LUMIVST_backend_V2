@@ -48,28 +48,29 @@ def calculate_all_indicators_for_stock(db: Session, symbol: str, target_date: da
     """
     
     # جلب البيانات من قاعدة البيانات
+    # نأخذ آخر 600 يوم فقط — يكفي لحساب كل المؤشرات (SMA200 + مساحة أمان)
     if target_date:
         query_limit = text("""
-            SELECT * FROM (
-                SELECT date, open, high, low, close
-                FROM prices
-                WHERE symbol = :symbol AND date <= :target_date
-                ORDER BY date DESC
-            ) as sub ORDER BY date ASC
+            SELECT date, open, high, low, close
+            FROM prices
+            WHERE symbol = :symbol AND date <= :target_date
+            ORDER BY date DESC
+            LIMIT 600
         """)
         result = db.execute(query_limit, {"symbol": symbol, "target_date": target_date})
     else:
         query_limit = text("""
-            SELECT * FROM (
-                SELECT date, open, high, low, close
-                FROM prices
-                WHERE symbol = :symbol
-                ORDER BY date DESC
-            ) as sub ORDER BY date ASC
+            SELECT date, open, high, low, close
+            FROM prices
+            WHERE symbol = :symbol
+            ORDER BY date DESC
+            LIMIT 600
         """)
         result = db.execute(query_limit, {"symbol": symbol})
-    
+
     rows = result.fetchall()
+    # البيانات جاية DESC من الـ LIMIT — نعكسها ASC للحسابات
+    rows = list(reversed(rows))
     
     if not rows or len(rows) < 100:
         print(f"⚠️  {symbol}: Not enough data ({len(rows)} rows)")
@@ -150,7 +151,21 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
     print(f"📅 Using latest date: {target_date}")
     
     # جلب جميع الأسهم المتاحة
-    if target_symbol:
+    # لو الـ tech_map موجودة (Batch Mode) نستخدم رموزها مباشرةً بدل query إضافية
+    if tech_map and not target_symbol:
+        # Batch Mode: الرموز واضحة من الـ tech_map، نجيب company_name بـ query واحدة
+        batch_symbols_list = list(tech_map.keys())
+        placeholders = ", ".join(f":sym_{i}" for i in range(len(batch_symbols_list)))
+        sym_params = {f"sym_{i}": s for i, s in enumerate(batch_symbols_list)}
+        sym_params["target_date"] = target_date
+        cn_query = text(f"""
+            SELECT DISTINCT ON (symbol) symbol, company_name
+            FROM prices
+            WHERE symbol IN ({placeholders}) AND date = :target_date
+        """)
+        cn_result = db.execute(cn_query, sym_params)
+        symbols_data = {row[0]: row[1] for row in cn_result.fetchall()}
+    elif target_symbol:
         symbols_query = text("""
             SELECT DISTINCT p.symbol, p.company_name
             FROM prices p
@@ -163,6 +178,7 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
             ORDER BY p.symbol
         """)
         symbols_result = db.execute(symbols_query, {"target_date": target_date, "symbol": target_symbol})
+        symbols_data = {row[0]: row[1] for row in symbols_result.fetchall()}
     else:
         symbols_query = text("""
             SELECT DISTINCT p.symbol, p.company_name
@@ -176,7 +192,7 @@ def calculate_and_store_indicators(db: Session, target_date: date = None, target
             ORDER BY p.symbol
         """)
         symbols_result = db.execute(symbols_query, {"target_date": target_date})
-    symbols_data = {row[0]: row[1] for row in symbols_result.fetchall()}
+        symbols_data = {row[0]: row[1] for row in symbols_result.fetchall()}
     
     total_stocks = len(symbols_data)
     print(f"📈 Found {total_stocks} stocks to process")
