@@ -44,6 +44,8 @@ def ensure_table_exists():
 
 def setup_driver():
     """Setup Chrome driver"""
+    import os
+    import shutil
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -53,8 +55,66 @@ def setup_driver():
     chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     chrome_options.set_capability('unhandledPromptBehavior', 'accept')
     chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
-    
-    service = Service(ChromeDriverManager().install())
+
+    # Try to find Chrome binary
+    chrome_bin = None
+    for env_var in ['CHROME_BIN', 'GOOGLE_CHROME_BIN', 'CHROMIUM_BIN']:
+        env_path = os.environ.get(env_var)
+        if env_path and os.path.exists(env_path):
+            chrome_bin = env_path
+            break
+            
+    if not chrome_bin:
+        for chrome_name in ['google-chrome-stable', 'google-chrome', 'chromium-browser', 'chromium', 'chrome']:
+            found_path = shutil.which(chrome_name)
+            if found_path:
+                chrome_bin = found_path
+                break
+                
+    if not chrome_bin:
+        linux_chrome_paths = [
+            '/opt/render/project/.chrome/chrome-linux64/chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/opt/google/chrome/chrome',
+            '/opt/google/chrome/google-chrome',
+            '/app/.apt/usr/bin/google-chrome',
+        ]
+        for path in linux_chrome_paths:
+            if os.path.exists(path):
+                chrome_bin = path
+                break
+
+    if chrome_bin:
+        chrome_options.binary_location = chrome_bin
+        logger.info(f"✅ Using Chrome binary: {chrome_bin}")
+
+    # Try to locate ChromeDriver manually first
+    chromedriver_path = None
+    env_chromedriver = os.environ.get('CHROMEDRIVER_PATH')
+    if env_chromedriver and os.path.exists(env_chromedriver):
+        chromedriver_path = env_chromedriver
+        
+    if not chromedriver_path:
+        possible_driver_paths = [
+            '/opt/render/project/.chrome/chromedriver-linux64/chromedriver',
+            '/app/.chromedriver/bin/chromedriver',
+            '/usr/bin/chromedriver',
+            '/usr/local/bin/chromedriver'
+        ]
+        for path in possible_driver_paths:
+            if os.path.exists(path):
+                chromedriver_path = path
+                break
+
+    if chromedriver_path:
+        logger.info(f"📍 Found explicit ChromeDriver at: {chromedriver_path}")
+        service = Service(chromedriver_path)
+    else:
+        service = Service(ChromeDriverManager().install())
+        
     return webdriver.Chrome(service=service, options=chrome_options)
 
 
