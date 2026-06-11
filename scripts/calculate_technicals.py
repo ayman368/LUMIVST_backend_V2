@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
 import logging
-import requests
 
 # إضافة المسار للمجلد الرئيسي للوصول للإعدادات
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -204,47 +203,32 @@ class TechnicalCalculator:
             logger.info("   ✅ تم العثور على مؤشر TASI في البيانات ليستخدم كـ Benchmark")
         else:
             try:
-                logger.info("   🌐 Fetching ^TASI.SR data from Yahoo Finance for 1 year...")
-                url = "https://query1.finance.yahoo.com/v8/finance/chart/^TASI.SR?interval=1d&range=1y"
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                res = requests.get(url, headers=headers, timeout=10)
-                data = res.json()
+                logger.info("   📊 جاري تحميل بيانات TASI من جدول historical_reports...")
+                hr_query = """
+                    SELECT report_date AS date, close_price AS market_close
+                    FROM historical_reports
+                    WHERE close_price IS NOT NULL
+                    ORDER BY report_date
+                """
+                with self.engine.connect() as conn:
+                    market_df = pd.read_sql(text(hr_query), conn)
 
-                result = data.get('chart', {}).get('result')
-                if not result:
-                    raise Exception("Yahoo API returned no data for ^TASI.SR")
+                if market_df.empty:
+                    raise Exception("جدول historical_reports فارغ — لا توجد بيانات TASI")
 
-                timestamps = result[0].get('timestamp', [])
-                quote = result[0].get('indicators', {}).get('quote', [{}])[0]
-                closes = quote.get('close', [])
-
-                dates, clean_closes = [], []
-                for ts, c in zip(timestamps, closes):
-                    if c is not None:
-                        dt = pd.to_datetime(ts, unit='s', utc=True).tz_convert('Asia/Riyadh')
-                        dates.append(dt.date())
-                        clean_closes.append(c)
-
-                meta = result[0].get('meta', {})
-                latest_time = meta.get('regularMarketTime')
-                latest_close = meta.get('regularMarketPrice')
-
-                if latest_time is not None and latest_close is not None:
-                    dt_latest = pd.to_datetime(latest_time, unit='s', utc=True).tz_convert('Asia/Riyadh').date()
-                    if dt_latest not in dates:
-                        logger.info(f"   ⚡ Fixing Yahoo Delay: Appending real-time data -> {dt_latest}")
-                        dates.append(dt_latest)
-                        clean_closes.append(latest_close)
-
-                market_df = pd.DataFrame({'date': dates, 'market_close': clean_closes})
                 market_df['date'] = pd.to_datetime(market_df['date'])
-                logger.info(f"   ✅ تم تحميل بيانات TASI من Yahoo (آخر تاريخ: {market_df['date'].max().date()}).")
+                # تحويل close_price من نص إلى رقم (الجدول يخزّنها كـ String)
+                market_df['market_close'] = pd.to_numeric(
+                    market_df['market_close'].astype(str).str.replace(',', ''), errors='coerce'
+                )
+                market_df = market_df.dropna(subset=['market_close'])
+                logger.info(f"   ✅ تم تحميل {len(market_df)} سجل من historical_reports (آخر تاريخ: {market_df['date'].max().date()}).")
 
             except Exception as e:
-                logger.error(f"   ❌ فشل سحب TASI من Yahoo: {e}")
+                logger.error(f"   ❌ فشل تحميل TASI من historical_reports: {e}")
                 market_df = df.groupby('date')['close'].mean().reset_index()
                 market_df.rename(columns={'close': 'market_close'}, inplace=True)
-                logger.info("   ⚠️ Fallback: تم حساب المؤشر العام تلقائياً")
+                logger.info("   ⚠️ Fallback: تم حساب المؤشر العام تلقائياً من متوسط أسعار الأسهم")
 
         df = df.sort_values(['symbol', 'date']).reset_index(drop=True)
         market_df = market_df.sort_values('date').reset_index(drop=True)

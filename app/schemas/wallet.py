@@ -136,6 +136,7 @@ class PortfolioPositionDB(BaseModel):
     entry_date: date
     created_at: datetime
     updated_at: datetime
+    transactions: Optional[list] = []
 
     model_config = {"from_attributes": True}
 

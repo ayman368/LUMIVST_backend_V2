@@ -100,6 +100,7 @@ def list_positions(
             "trend_signal": bool(latest_ind.trend_signal) if latest_ind else False,
             "final_signal": bool(latest_ind.final_signal) if latest_ind else False,
             "score": int(latest_ind.score) if latest_ind and latest_ind.score else 0,
+            "transactions": pos.transactions,
         }
         result.append(pos_dict)
 
@@ -359,3 +360,419 @@ def partial_sell_position(
         db.commit()
         db.refresh(position)
         return {"message": "Position partially sold", "realized_pnl": realized_pnl, "closed": False}
+
+
+from pydantic import BaseModel
+
+class CashUpdate(BaseModel):
+    cash: float
+
+@router.get(
+    "/settings/cash",
+    summary="Get available cash",
+)
+def get_cash(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.models.wallet import WalletSetting
+    setting = db.query(WalletSetting).filter(
+        WalletSetting.user_id == current_user.id,
+        WalletSetting.key == "portfolio_cash"
+    ).first()
+    if not setting:
+        return {"cash": 0.0}
+    return {"cash": float(setting.value.get("amount", 0.0))}
+
+@router.put(
+    "/settings/cash",
+    summary="Update available cash",
+)
+def update_cash(
+    req: CashUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.models.wallet import WalletSetting
+    setting = db.query(WalletSetting).filter(
+        WalletSetting.user_id == current_user.id,
+        WalletSetting.key == "portfolio_cash"
+    ).first()
+    if not setting:
+        setting = WalletSetting(
+            user_id=current_user.id,
+            key="portfolio_cash",
+            value={"amount": req.cash}
+        )
+        db.add(setting)
+    else:
+        setting.value = {"amount": req.cash}
+    db.commit()
+    return {"cash": req.cash}
+
+@router.get(
+    "/transactions",
+    summary="Get all transactions from all positions",
+)
+def get_all_transactions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    positions = db.query(WalletPosition).filter(WalletPosition.user_id == current_user.id).all()
+    all_txs = []
+    
+    # 1. Transactions from open positions
+    for pos in positions:
+        if pos.transactions:
+            for tx in pos.transactions:
+                all_txs.append({
+                    "id": f"pos_{pos.id}_{tx.get('date')}_{tx.get('type')}",
+                    "symbol": pos.symbol,
+                    "type": tx.get("type", "buy"),
+                    "date": tx.get("date"),
+                    "qty": float(tx.get("qty", 0)),
+                    "price": float(tx.get("price", 0)),
+                    "status": "completed",
+                    "value": float(tx.get("qty", 0)) * float(tx.get("price", 0))
+                })
+
+    # 2. Closed trades (WalletTrades) as sell transactions
+    from app.models.wallet import WalletTrade
+    trades = db.query(WalletTrade).filter(WalletTrade.user_id == current_user.id).all()
+    for tr in trades:
+        all_txs.append({
+            "id": f"trade_{tr.id}",
+            "symbol": tr.symbol,
+            "type": "sell",
+            "date": tr.exit_date.isoformat() if tr.exit_date else None,
+            "qty": 0, # Closed trades do not store quantity in wallet_trades
+            "price": 0,
+            "status": "completed",
+            "value": float(tr.realized_pnl)
+        })
+
+    # sort by date descending
+    all_txs.sort(key=lambda x: x["date"] or "", reverse=True)
+    return all_txs
+
+@router.get(
+    "/events",
+    summary="Get real events from IncomeStatement (Mocked dividends until table exists)",
+)
+def get_portfolio_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    import datetime
+    from app.models.wallet import WalletPosition
+    from app.models.financials import IncomeStatement
+    
+    today = datetime.date.today()
+    
+    positions = db.query(WalletPosition).filter(WalletPosition.user_id == current_user.id).all()
+    symbols = [p.symbol for p in positions]
+    
+    # Get the latest 5 financial reports for the symbols held
+    financials = []
+    if symbols:
+        statements = db.query(IncomeStatement).filter(
+            IncomeStatement.symbol.in_(symbols)
+        ).order_by(IncomeStatement.fiscal_date.desc()).limit(10).all()
+        
+        for st in statements:
+            if not st.fiscal_date: continue
+            days_diff = (st.fiscal_date - today).days
+            status = "upcoming" if days_diff > 0 else "past"
+            financials.append({
+                "id": f"fin_{st.id}",
+                "symbol": st.symbol,
+                "type": "financials",
+                "title": f"نتائج {st.quarter or ''} {st.year or ''}".strip(),
+                "date": st.fiscal_date.isoformat(),
+                "period": st.quarter or str(st.year),
+                "status": status
+            })
+    
+    return {
+        "dividends": [
+            { "id": "mock_1", "symbol": "2222", "type": "dividend", "title": "توزيع أرباح (تجريبي)", "date": (today + datetime.timedelta(days=12)).isoformat(), "amount": 0.31, "status": "upcoming" }
+        ],
+        "financials": financials
+    }
+
+@router.get(
+    "/performance",
+    summary="Get historical portfolio performance (On-the-fly calculation with real TWR)",
+)
+def get_portfolio_performance(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    import datetime
+    from app.models.wallet import WalletPosition, WalletSetting, WalletTrade
+    from app.models.price import Price
+    
+    today = datetime.date.today()
+    start_date = today - datetime.timedelta(days=30)
+    
+    positions = db.query(WalletPosition).filter(WalletPosition.user_id == current_user.id).all()
+    symbols = [p.symbol for p in positions]
+    
+    # Get cash setting
+    setting = db.query(WalletSetting).filter(
+        WalletSetting.user_id == current_user.id,
+        WalletSetting.key == "portfolio_cash"
+    ).first()
+    current_cash = float(setting.value.get("amount", 0.0)) if setting else 0.0
+    
+    if not symbols:
+        # No positions → return flat zero line
+        history = []
+        for i in range(30, -1, -1):
+            d = today - datetime.timedelta(days=i)
+            history.append({
+                "date": d.strftime("%m-%d"),
+                "sr": 0.0,
+                "twr": 0.0,
+                "tasi": 0.0
+            })
+        return history
+    
+    # Fetch prices for the last 30 days + some buffer for lookback
+    buffer_start = start_date - datetime.timedelta(days=10)
+    prices = db.query(Price).filter(
+        Price.date >= buffer_start,
+        Price.symbol.in_(symbols + ["TASI", "^TASI"])
+    ).all()
+    
+    price_map: dict = {}
+    for p in prices:
+        date_str = p.date.isoformat()
+        if date_str not in price_map:
+            price_map[date_str] = {}
+        price_map[date_str][p.symbol] = float(p.close)
+    
+    # Collect all cash flow events (buy/sell transactions) for TWR sub-period splitting
+    all_cash_flows: list = []  # list of (date, amount) where amount > 0 = inflow, < 0 = outflow
+    for pos in positions:
+        if pos.transactions:
+            for tx in pos.transactions:
+                tx_date_str = tx.get('date', '')[:10]
+                if not tx_date_str:
+                    continue
+                try:
+                    tx_date = datetime.date.fromisoformat(tx_date_str)
+                except ValueError:
+                    continue
+                tx_qty = float(tx.get('qty', 0))
+                tx_price = float(tx.get('price', 0))
+                if tx.get('type') in ['buy', 'add']:
+                    all_cash_flows.append((tx_date, tx_qty * tx_price))
+                elif tx.get('type') == 'sell':
+                    all_cash_flows.append((tx_date, -(tx_qty * tx_price)))
+    
+    all_cash_flows.sort(key=lambda x: x[0])
+    
+    def get_price_for_symbol_on_date(sym: str, d: datetime.date) -> float | None:
+        """Find most recent available price for a symbol on or before a date."""
+        for j in range(0, 15):
+            check = (d - datetime.timedelta(days=j)).isoformat()
+            if check in price_map and sym in price_map[check]:
+                return price_map[check][sym]
+        return None
+    
+    def get_tasi_on_date(d: datetime.date) -> float:
+        for j in range(0, 15):
+            check = (d - datetime.timedelta(days=j)).isoformat()
+            if check in price_map:
+                if "TASI" in price_map[check]:
+                    return price_map[check]["TASI"]
+                elif "^TASI" in price_map[check]:
+                    return price_map[check]["^TASI"]
+        return 10000.0  # fallback
+    
+    def calc_portfolio_value_on_date(d: datetime.date) -> tuple:
+        """Returns (invested_value, total_cost) for all positions on a given date."""
+        total_value = 0.0
+        total_cost = 0.0
+        
+        for pos in positions:
+            qty_on_date = 0.0
+            cost_on_date = 0.0
+            if pos.transactions:
+                for tx in pos.transactions:
+                    tx_date_str = tx.get('date', d.isoformat())[:10]
+                    try:
+                        tx_date = datetime.date.fromisoformat(tx_date_str)
+                    except ValueError:
+                        continue
+                    if tx_date <= d:
+                        tx_qty = float(tx.get('qty', 0))
+                        tx_price = float(tx.get('price', 0))
+                        if tx.get('type') in ['buy', 'add']:
+                            qty_on_date += tx_qty
+                            cost_on_date += tx_qty * tx_price
+                        elif tx.get('type') == 'sell':
+                            qty_on_date -= tx_qty
+                            cost_on_date -= tx_qty * tx_price
+            else:
+                if pos.entry_date and pos.entry_date <= d:
+                    qty_on_date = float(pos.qty)
+                    cost_on_date = float(pos.qty) * float(pos.buy_price)
+            
+            if qty_on_date > 0:
+                sym_price = get_price_for_symbol_on_date(pos.symbol, d)
+                if sym_price is None:
+                    sym_price = float(pos.buy_price)
+                total_value += qty_on_date * sym_price
+                total_cost += cost_on_date
+        
+        return total_value, total_cost
+    
+    # ── Build daily history ──
+    history = []
+    base_tasi_val = None
+    
+    # TWR state: compound factor
+    twr_compound = 1.0
+    prev_day_portfolio_value = None
+    
+    for i in range(30, -1, -1):
+        d = today - datetime.timedelta(days=i)
+        
+        invested_value, total_cost = calc_portfolio_value_on_date(d)
+        portfolio_value = invested_value + current_cash
+        
+        # ── SR (Simple Return): (current_invested_value - total_cost) / total_cost ──
+        if total_cost > 0:
+            sr = ((invested_value - total_cost) / total_cost) * 100
+        else:
+            sr = 0.0
+        
+        # ── TWR (Time-Weighted Return) ──
+        # For each day, calculate: sub_period_return = (V_end - V_start - CF) / (V_start + CF_in)
+        # Then compound: TWR = product(1 + r_i) - 1
+        if prev_day_portfolio_value is not None and prev_day_portfolio_value > 0:
+            # Sum of cash flows that happened on this day
+            cf_today = sum(cf_amt for cf_date, cf_amt in all_cash_flows if cf_date == d)
+            
+            # Sub-period return: how much the portfolio grew excluding the effect of cash flows
+            v_start = prev_day_portfolio_value
+            v_end = portfolio_value
+            
+            # Adjusted start = start + inflows (invested right at the start of day)
+            adjusted_start = v_start + max(cf_today, 0)
+            
+            if adjusted_start > 0:
+                sub_return = (v_end - v_start - cf_today) / adjusted_start
+                twr_compound *= (1 + sub_return)
+            # else: skip this sub-period (division by zero edge case)
+        
+        prev_day_portfolio_value = portfolio_value
+        
+        twr = (twr_compound - 1) * 100
+        
+        # ── TASI ──
+        tasi_price = get_tasi_on_date(d)
+        if base_tasi_val is None:
+            base_tasi_val = tasi_price
+        tasi_pct = ((tasi_price - base_tasi_val) / base_tasi_val * 100) if base_tasi_val else 0.0
+        
+        history.append({
+            "date": d.strftime("%m-%d"),
+            "sr": round(sr, 2),
+            "twr": round(twr, 2),
+            "tasi": round(tasi_pct, 2)
+        })
+
+    return history
+
+
+@router.get(
+    "/summary",
+    summary="Get portfolio summary computed on-the-fly",
+)
+def get_portfolio_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns aggregated portfolio stats:
+    - total_value (stocks + cash)
+    - stocks_value
+    - total_cost
+    - cash
+    - unrealized_pnl, unrealized_pnl_pct
+    - realized_pnl (from closed trades)
+    - num_positions
+    """
+    from app.models.wallet import WalletPosition, WalletSetting, WalletTrade
+
+    positions = db.query(WalletPosition).filter(WalletPosition.user_id == current_user.id).all()
+    
+    setting = db.query(WalletSetting).filter(
+        WalletSetting.user_id == current_user.id,
+        WalletSetting.key == "portfolio_cash"
+    ).first()
+    cash = float(setting.value.get("amount", 0.0)) if setting else 0.0
+    
+    total_cost = 0.0
+    stocks_value = 0.0
+    
+    for pos in positions:
+        qty = float(pos.qty)
+        buy_p = float(pos.buy_price)
+        total_cost += qty * buy_p
+        
+        latest_price = db.query(Price).filter(
+            Price.symbol == pos.symbol
+        ).order_by(Price.date.desc()).first()
+        
+        current_price = float(latest_price.close) if latest_price else buy_p
+        stocks_value += qty * current_price
+    
+    unrealized_pnl = stocks_value - total_cost
+    unrealized_pnl_pct = (unrealized_pnl / total_cost * 100) if total_cost > 0 else 0.0
+    
+    # Realized P&L from closed trades
+    trades = db.query(WalletTrade).filter(WalletTrade.user_id == current_user.id).all()
+    realized_pnl = sum(float(t.realized_pnl) for t in trades)
+    
+    return {
+        "total_value": round(stocks_value + cash, 2),
+        "stocks_value": round(stocks_value, 2),
+        "total_cost": round(total_cost, 2),
+        "cash": round(cash, 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
+        "unrealized_pnl_pct": round(unrealized_pnl_pct, 2),
+        "realized_pnl": round(realized_pnl, 2),
+        "num_positions": len(positions),
+    }
+
+
+@router.get(
+    "/realized-pnl",
+    summary="Get closed trade history with realized P&L",
+)
+def get_realized_pnl(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.models.wallet import WalletTrade
+    
+    trades = db.query(WalletTrade).filter(
+        WalletTrade.user_id == current_user.id
+    ).order_by(WalletTrade.exit_date.desc()).all()
+    
+    result = []
+    for t in trades:
+        result.append({
+            "id": t.id,
+            "symbol": t.symbol,
+            "realized_pnl": float(t.realized_pnl),
+            "pnl_pct": float(t.pnl_pct) * 100,
+            "days_held": t.days_held,
+            "exit_date": t.exit_date.isoformat() if t.exit_date else None,
+        })
+    
+    return result
