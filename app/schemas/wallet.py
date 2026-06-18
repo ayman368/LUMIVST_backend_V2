@@ -124,6 +124,12 @@ class PortfolioPositionSellRequest(BaseModel):
     trade_date: date = Field(..., description="Date of the sale")
 
 
+class PortfolioPositionCloseRequest(BaseModel):
+    sell_price: float = Field(..., gt=0, description="Sell price of the shares")
+    exit_date: date = Field(..., description="Date of the sale")
+
+
+
 class PortfolioPositionDB(BaseModel):
     id: int
     symbol: str

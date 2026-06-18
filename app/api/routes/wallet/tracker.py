@@ -271,3 +271,17 @@ def create_trades(
     for trade in created:
         db.refresh(trade)
     return created
+
+
+@router.delete(
+    "/trades/all",
+    status_code=204,
+    summary="Delete all closed trades for the current user (reset tracker)",
+)
+def delete_all_trades(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    db.query(WalletTrade).filter(WalletTrade.user_id == current_user.id).delete()
+    db.commit()
+    return None

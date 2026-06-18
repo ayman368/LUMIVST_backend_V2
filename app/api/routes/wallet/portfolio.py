@@ -11,12 +11,14 @@ from app.schemas.wallet import (
     PortfolioPositionDBUpdate,
     PortfolioPositionAddRequest,
     PortfolioPositionSellRequest,
+    PortfolioPositionCloseRequest,
 )
 from app.models.wallet import WalletPosition
 from app.models.price import Price
 from app.models.stock_indicators import StockIndicator
 from app.models.market_reports import NetShortPosition
 from app.models.static_stock_info import StaticStockInfo
+from app.models.rs_daily import RSDaily
 from app.models.user import User
 from app.core.database import get_db
 from app.api.deps import get_current_user
@@ -62,6 +64,11 @@ def list_positions(
             StaticStockInfo.symbol == pos.symbol
         ).first()
 
+        # Latest RS daily record
+        latest_rs = db.query(RSDaily).filter(
+            RSDaily.symbol == pos.symbol
+        ).order_by(RSDaily.date.desc()).first()
+
         current_price = float(latest_price.close) if latest_price else float(pos.buy_price)
         prev_close = float(latest_price.open) if latest_price and latest_price.open else current_price
         change_pct = float(latest_price.change_percent) / 100 if latest_price and latest_price.change_percent else 0.0
@@ -100,6 +107,13 @@ def list_positions(
             "trend_signal": bool(latest_ind.trend_signal) if latest_ind else False,
             "final_signal": bool(latest_ind.final_signal) if latest_ind else False,
             "score": int(latest_ind.score) if latest_ind and latest_ind.score else 0,
+            # Enriched from RSDaily
+            "rs_rating": int(latest_rs.rs_rating) if latest_rs and latest_rs.rs_rating is not None else None,
+            "rank_1m": int(latest_rs.rank_1m) if latest_rs and latest_rs.rank_1m is not None else None,
+            "rank_3m": int(latest_rs.rank_3m) if latest_rs and latest_rs.rank_3m is not None else None,
+            "rank_6m": int(latest_rs.rank_6m) if latest_rs and latest_rs.rank_6m is not None else None,
+            "rank_9m": int(latest_rs.rank_9m) if latest_rs and latest_rs.rank_9m is not None else None,
+            "rank_12m": int(latest_rs.rank_12m) if latest_rs and latest_rs.rank_12m is not None else None,
             "transactions": pos.transactions,
         }
         result.append(pos_dict)
@@ -209,6 +223,7 @@ def delete_position(
 )
 def close_position(
     position_id: int,
+    req: PortfolioPositionCloseRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -223,8 +238,7 @@ def close_position(
     if not position:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
 
-    latest_price = db.query(Price).filter(Price.symbol == position.symbol).order_by(Price.date.desc()).first()
-    current_price = float(latest_price.close) if latest_price else float(position.buy_price)
+    current_price = req.sell_price
 
     qty = float(position.qty)
     buy_price = float(position.buy_price)
@@ -233,7 +247,7 @@ def close_position(
     pnl_pct = realized_pnl / (buy_price * qty) if buy_price * qty > 0 else 0.0
 
     entry_date = position.entry_date or date.today()
-    exit_date = date.today()
+    exit_date = req.exit_date
     days_held = max((exit_date - entry_date).days, 0)
 
     trade = WalletTrade(
