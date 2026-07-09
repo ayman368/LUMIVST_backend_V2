@@ -46,8 +46,21 @@ def build_driver(headless=True):
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
-    options.add_argument("--remote-debugging-port=9222")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    # Memory optimization flags (critical for Render 512MB instances)
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-translate")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--disable-features=TranslateUI")
+    options.add_argument("--disable-ipc-flooding-protection")
+    options.add_argument("--js-flags=--max-old-space-size=128")
+    options.add_argument("--single-process")
+    options.add_argument("--memory-pressure-off")
     
     if headless:
         options.add_argument("--headless=new")

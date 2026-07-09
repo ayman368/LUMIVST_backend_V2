@@ -1,8 +1,9 @@
-import json
+import gc
 import logging
 import time
 from datetime import datetime
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from app.services.daily_detailed_scraper import build_driver
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,15 @@ def parse_date_from_text(text):
 def extract_table_rows(driver, url, wait_time=5):
     """
     Navigates to URL, waits, finding the date and table data.
+    Returns (report_date, headers, rows). On timeout returns empty data.
     """
-    driver.get(url)
+    try:
+        driver.get(url)
+    except TimeoutException:
+        logger.warning(f"Page load timed out for {url}, attempting partial parse...")
+    except WebDriverException as e:
+        logger.error(f"WebDriver error loading {url}: {e}")
+        return datetime.now().date(), [], []
     time.sleep(wait_time) # Wait for JS to render
     
     # Try finding the Last Update Date
@@ -91,7 +99,13 @@ def scrape_substantial_shareholders(driver):
     url = 'https://www.saudiexchange.sa/Resources/Reports-v2/MajorStakeHoldersPage_en.html'
     data = []
     try:
-        driver.get(url)
+        try:
+            driver.get(url)
+        except TimeoutException:
+            logger.warning("Page load timed out for Substantial Shareholders, attempting partial parse...")
+        except WebDriverException as e:
+            logger.error(f"WebDriver error loading Substantial Shareholders: {e}")
+            return data
         time.sleep(8) # Wait a bit longer to ensure it loads
         
         # Get report date
@@ -152,6 +166,13 @@ def scrape_substantial_shareholders(driver):
         logger.info(f"Scraped {len(data)} Substantial Shareholders records.")
     except Exception as e:
         logger.error(f"Error scraping Substantial Shareholders: {e}")
+    finally:
+        # Free page memory
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        gc.collect()
     return data
 
 def scrape_net_short_positions(driver):
@@ -172,6 +193,12 @@ def scrape_net_short_positions(driver):
         logger.info(f"Scraped {len(data)} Net Short Positions records.")
     except Exception as e:
         logger.error(f"Error scraping Net Short Positions: {e}")
+    finally:
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        gc.collect()
     return data
 
 def scrape_foreign_headroom(driver):
@@ -192,6 +219,12 @@ def scrape_foreign_headroom(driver):
         logger.info(f"Scraped {len(data)} Foreign Headroom records.")
     except Exception as e:
         logger.error(f"Error scraping Foreign Headroom: {e}")
+    finally:
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        gc.collect()
     return data
 
 def scrape_share_buybacks(driver):
@@ -213,6 +246,12 @@ def scrape_share_buybacks(driver):
         logger.info(f"Scraped {len(data)} Share Buybacks records.")
     except Exception as e:
         logger.error(f"Error scraping Share Buybacks: {e}")
+    finally:
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        gc.collect()
     return data
 
 def scrape_sbl_positions(driver):
@@ -233,4 +272,10 @@ def scrape_sbl_positions(driver):
         logger.info(f"Scraped {len(data)} SBL Positions records.")
     except Exception as e:
         logger.error(f"Error scraping SBL Positions: {e}")
+    finally:
+        try:
+            driver.get("about:blank")
+        except Exception:
+            pass
+        gc.collect()
     return data
