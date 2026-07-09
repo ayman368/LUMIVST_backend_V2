@@ -197,7 +197,7 @@ def start_scheduler():
     )
     _scheduler.add_job(
         job_market_reports_scrapers,
-        CronTrigger(day_of_week="sun-thu", hour=18, minute=0, timezone=EGYPT_TZ),
+        CronTrigger(day_of_week="sun,mon,tue,wed,thu", hour=18, minute=0, timezone=EGYPT_TZ),
         id="market_reports", name="Saudi Market Reports Scrapers", replace_existing=True,
     )
 
