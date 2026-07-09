@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import stocks, cache, auth, contact, rs, rs_v2, admin, scraper, official_filings, financial_details, prices, technical_screener, financial_metrics, screeners, market_breadth, market_reports, economic_indicators, xbrl_companies, xbrl_financials, xbrl_upload
+from app.api.routes import stocks, cache, auth, contact, rs, rs_v2, admin, scraper, official_filings, financial_details, prices, technical_screener, financial_metrics, screeners, market_breadth, market_reports, economic_indicators, xbrl_companies, xbrl_financials, xbrl_upload, weekly_market_update
 from app.api.routes import naaim as naaim_router
 from app.api.routes import market_pulse as market_pulse_router
 from app.api.routes import rs_line as rs_line_router
@@ -49,6 +49,7 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None
 )
 
+from fastapi.middleware.gzip import GZipMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.limiter import limiter
@@ -57,6 +58,7 @@ from app.core.csrf import CSRFMiddleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(CSRFMiddleware)
 
 app.add_middleware(
@@ -132,6 +134,7 @@ app.include_router(screeners.router, prefix="/api")  # Stock Screeners (PUBLIC)
 app.include_router(financial_metrics.router, prefix="/api/financial-metrics", tags=["Financial Metrics"])  # /api/financial-metrics/*
 app.include_router(market_breadth.router, prefix="/api")  # /api/market-breadth/*
 app.include_router(market_reports.router, prefix="/api/market-reports", tags=["Market Reports"])
+app.include_router(weekly_market_update.router, prefix="/api", tags=["Weekly Market Update"])
 app.include_router(economic_indicators.router, prefix="/api/economic-indicators", tags=["Economic Indicators"])
 app.include_router(naaim_router.router, prefix="/api/naaim", tags=["NAAIM Exposure Index"])
 app.include_router(xbrl_companies.router, dependencies=protected_dependencies)
@@ -155,6 +158,15 @@ app.include_router(wallet_rbaf.router, prefix="/api/wallet/rbaf", tags=["Wallet 
 app.include_router(wallet_portfolio.router, prefix="/api/wallet/portfolio", tags=["Wallet - Portfolio"], dependencies=protected_dependencies)
 app.include_router(wallet_tracker.router, prefix="/api/wallet/tracker", tags=["Wallet - Monthly Tracker"], dependencies=protected_dependencies)
 app.include_router(wallet_weekly.router, prefix="/api/wallet/weekly", tags=["Wallet - Weekly Study"], dependencies=protected_dependencies)
+
+# ── Valuation System ──
+from app.api.routes import valuation as valuation_router
+from app.api.routes import valuation_admin_config as valuation_admin_config_router
+from app.api.routes import valuation_admin_system as valuation_admin_system_router
+
+app.include_router(valuation_router.router, tags=["Valuation"], dependencies=protected_dependencies)
+app.include_router(valuation_admin_config_router.router, tags=["Admin — Valuation Config"], dependencies=admin_dependencies)
+app.include_router(valuation_admin_system_router.router, tags=["Admin — System"], dependencies=admin_dependencies)
 
 # Event handlers
 @app.on_event("startup")

@@ -9,6 +9,7 @@ from sqlalchemy import case, func
 from typing import Optional, List, Tuple
 from datetime import date, timedelta
 import pandas as pd
+import urllib.parse
 
 from app.core.database import get_db
 from app.core.cache_helpers import cache_read_through
@@ -49,13 +50,32 @@ def _window_mean(values: list[float], window: int, index: int) -> float:
     return sum(chunk) / len(chunk) if chunk else 0.0
 
 
-def _apply_period_filter(data_all: list, period: str) -> list:
+def _apply_period_filter(
+    data_all: list,
+    period: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> list:
     target_date = _period_min_date(period)
+    filtered_data = data_all
+
+    if start_date:
+        filtered_data = [
+            d for d in filtered_data
+            if d.get('date_obj') is not None and d['date_obj'] >= start_date
+        ]
+
+    if end_date:
+        filtered_data = [
+            d for d in filtered_data
+            if d.get('date_obj') is not None and d['date_obj'] <= end_date
+        ]
+
     if target_date:
         target_str = target_date.isoformat()
-        filtered_data = [d for d in data_all if str(d['date_obj']) >= target_str]
+        filtered_data = [d for d in filtered_data if str(d['date_obj']) >= target_str]
     else:
-        filtered_data = data_all
+        filtered_data = filtered_data
 
     for d in filtered_data:
         d.pop('date_obj', None)
@@ -126,7 +146,13 @@ def _compute_breadth_from_prices_df(df: pd.DataFrame) -> list:
     return data_all
 
 
-def _compute_filtered_breadth(db: Session, statuses: List[str], period: str) -> dict:
+def _compute_filtered_breadth(
+    db: Session,
+    statuses: List[str],
+    period: str,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> dict:
     symbol_rows = (
         db.query(StaticStockInfo.symbol)
         .filter(StaticStockInfo.approval_with_controls.in_(statuses))
@@ -147,15 +173,21 @@ def _compute_filtered_breadth(db: Session, statuses: List[str], period: str) -> 
 
     df = pd.DataFrame(rows, columns=['symbol', 'date', 'close'])
     data_all = _compute_breadth_from_prices_df(df)
-    filtered_data = _apply_period_filter(data_all, period)
+    filtered_data = _apply_period_filter(data_all, period, start_date, end_date)
     return {"count": len(filtered_data), "data": filtered_data}
 
 
-def _load_percent_above_ma(db: Session, period: str, approval_with_controls: Optional[str]) -> dict:
+def _load_percent_above_ma(
+    db: Session,
+    period: str,
+    approval_with_controls: Optional[str],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> dict:
     if approval_with_controls:
         statuses = [s.strip() for s in approval_with_controls.split(',') if s.strip()]
         if statuses:
-            return _compute_filtered_breadth(db, statuses, period)
+            return _compute_filtered_breadth(db, statuses, period, start_date, end_date)
 
     from app.models import market_breadth as mb
 
@@ -187,7 +219,7 @@ def _load_percent_above_ma(db: Session, period: str, approval_with_controls: Opt
             "ma200_200": _window_mean(pct200, 200, i),
         })
 
-    filtered_data = _apply_period_filter(data_all, period)
+    filtered_data = _apply_period_filter(data_all, period, start_date, end_date)
     return {"count": len(filtered_data), "data": filtered_data}
 
 
@@ -251,20 +283,46 @@ def _build_ad_rating_series(db: Session, limit: int, min_date: Optional[date] = 
     return series
 
 
-async def _load_ad_rating(db: Session, period: str, limit: int) -> dict:
+async def _load_ad_rating(
+    db: Session, 
+    period: str, 
+    limit: int,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> dict:
     min_date = _period_min_date(period)
+    
+    # We cache the raw full data for this limit/period
     cache_key = f"market_breadth:ad_rating:v2:limit:{limit}:period:{period.upper()}"
 
     async def fetch():
         return _build_ad_rating_series(db, limit, min_date=min_date)
 
     data_all = await cache_read_through(cache_key, AD_RATING_CACHE_TTL, fetch)
-    filtered_data = _apply_period_filter(data_all, period)
+    
+    # Deep copy to avoid mutating cached objects when we pop date_obj
+    import copy
+    data_all_copy = copy.deepcopy(data_all)
+    
+    # Re-hydrate date_obj if it got serialized to string from cache
+    for d in data_all_copy:
+        if 'date_obj' not in d and 'time' in d:
+            from datetime import datetime
+            d['date_obj'] = datetime.fromisoformat(d['time']).date()
+        elif isinstance(d.get('date_obj'), str):
+            from datetime import datetime
+            d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
+
+    filtered_data = _apply_period_filter(data_all_copy, period, start_date, end_date)
     return {"count": len(filtered_data), "data": filtered_data}
 
 
 def _load_screener_daily_bundle(
-    db: Session, period: str, limit: int
+    db: Session, 
+    period: str, 
+    limit: int,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
 ) -> Tuple[dict, dict]:
     """One DB read for Minervini trends + Alhussain (same table)."""
     from app.models.screener_daily_trend import ScreenerDailyTrend
@@ -316,8 +374,8 @@ def _load_screener_daily_bundle(
             "date_obj": d,
         })
 
-    trend_filtered = _apply_period_filter(trend_all, period)
-    alh_filtered = _apply_period_filter(alhussain_all, period)
+    trend_filtered = _apply_period_filter(trend_all, period, start_date, end_date)
+    alh_filtered = _apply_period_filter(alhussain_all, period, start_date, end_date)
     return (
         {"count": len(trend_filtered), "data": trend_filtered},
         {"count": len(alh_filtered), "data": alh_filtered},
@@ -331,10 +389,31 @@ def _dashboard_cache_key(
     approval_with_controls: Optional[str],
 ) -> str:
     shariah = (approval_with_controls or "").strip().lower()
+    shariah_safe = urllib.parse.quote(shariah)
     return (
         f"market_breadth:dashboard:v2:"
-        f"period:{period.upper()}:ad:{ad_limit}:scr:{screener_limit}:sh:{shariah}"
+        f"period:{period.upper()}:ad:{ad_limit}:scr:{screener_limit}:sh:{shariah_safe}"
     )
+
+
+def _percent_above_ma_cache_key(
+    period: str,
+    approval_with_controls: Optional[str],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> str:
+    shariah = (approval_with_controls or "").strip().lower()
+    shariah_safe = urllib.parse.quote(shariah)
+    start_safe = start_date.isoformat() if start_date else ""
+    end_safe = end_date.isoformat() if end_date else ""
+    return (
+        f"market_breadth:percent_above_ma:v2:period:{period.upper()}:"
+        f"sh:{shariah_safe}:start:{start_safe}:end:{end_safe}"
+    )
+
+
+def _screener_bundle_cache_key(period: str, limit: int, kind: str) -> str:
+    return f"market_breadth:{kind}:v2:limit:{limit}:period:{period.upper()}"
 
 
 async def _build_dashboard_payload(
@@ -343,10 +422,12 @@ async def _build_dashboard_payload(
     ad_limit: int,
     screener_limit: int,
     approval_with_controls: Optional[str],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
 ) -> dict:
-    ma = _load_percent_above_ma(db, period, approval_with_controls)
-    ad = await _load_ad_rating(db, period, ad_limit)
-    screener_trend, alhussain = _load_screener_daily_bundle(db, period, screener_limit)
+    ma = _load_percent_above_ma(db, period, approval_with_controls, start_date, end_date)
+    ad = await _load_ad_rating(db, period, ad_limit, start_date, end_date)
+    screener_trend, alhussain = _load_screener_daily_bundle(db, period, screener_limit, start_date, end_date)
     return {
         "period": period.upper(),
         "ma_breadth": ma,
@@ -367,6 +448,8 @@ async def get_market_breadth_dashboard(
         None,
         description="Comma-separated Shariah statuses (Arabic labels)",
     ),
+    start_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
 ):
     """
     Single request for all market-breadth charts (MA + A/D + Alhussain + Minervini trends).
@@ -374,14 +457,46 @@ async def get_market_breadth_dashboard(
     """
     try:
         limit = min(ad_limit, alhussain_limit, screener_trend_limit)
+        
+        # We cache the data WITHOUT start_date/end_date filtering, then filter after
         cache_key = _dashboard_cache_key(period, limit, limit, approval_with_controls)
 
         async def fetch():
+            # fetch without date filtering
             return await _build_dashboard_payload(
                 db, period, limit, limit, approval_with_controls
             )
 
-        return await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
+        data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
+        
+        # If dates are provided, we need to filter the cached response
+        if start_date or end_date:
+            import copy
+            data_copy = copy.deepcopy(data)
+            
+            def filter_dataset(dataset):
+                if not dataset or not isinstance(dataset, dict) or 'data' not in dataset:
+                    return dataset
+                
+                for d in dataset['data']:
+                    if 'date_obj' not in d and 'time' in d:
+                        from datetime import datetime
+                        d['date_obj'] = datetime.fromisoformat(d['time']).date()
+                    elif isinstance(d.get('date_obj'), str):
+                        from datetime import datetime
+                        d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
+                
+                filtered = _apply_period_filter(dataset['data'], period, start_date, end_date)
+                return {"count": len(filtered), "data": filtered}
+
+            data_copy['ma_breadth'] = filter_dataset(data_copy.get('ma_breadth'))
+            data_copy['ad_rating'] = filter_dataset(data_copy.get('ad_rating'))
+            data_copy['alhussain'] = filter_dataset(data_copy.get('alhussain'))
+            data_copy['screener_trend'] = filter_dataset(data_copy.get('screener_trend'))
+            
+            return data_copy
+            
+        return data
     except Exception as e:
         print(f"Error loading market breadth dashboard: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -391,6 +506,8 @@ async def get_market_breadth_dashboard(
 async def get_percent_above_ma(
     db: Session = Depends(get_db),
     period: str = Query("ALL", description="5D, 1M, 6M, 1Y, 5Y, 10Y, ALL"),
+    start_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
     approval_with_controls: Optional[str] = Query(
         None,
         description="Comma-separated Shariah statuses (Arabic labels)",
@@ -401,7 +518,10 @@ async def get_percent_above_ma(
     Uses market_breadth table for fast aggregated data.
     """
     try:
-        return _load_percent_above_ma(db, period, approval_with_controls)
+        cache_key = _percent_above_ma_cache_key(period, approval_with_controls, start_date, end_date)
+        async def fetch():
+            return _load_percent_above_ma(db, period, approval_with_controls, start_date, end_date)
+        return await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
     except Exception as e:
         print(f"Error computing market breadth: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -412,6 +532,8 @@ async def get_alhussain_count(
     db: Session = Depends(get_db),
     period: str = Query("ALL", description="5D, 1M, 6M, 1Y, 5Y, 10Y, ALL"),
     limit: int = Query(6000, ge=1, le=6000),
+    start_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
 ):
     """
     Historical daily count of stocks passing the Alhussain screener criteria.
@@ -419,8 +541,29 @@ async def get_alhussain_count(
     Run scripts/backfill_alhussain_daily.py once to populate history.
     """
     try:
-        _, alhussain = _load_screener_daily_bundle(db, period, limit)
-        return alhussain
+        # Cache key should include dates if we filter in fetch, but here we can filter after cache
+        cache_key = _screener_bundle_cache_key(period, limit, "alhussain_count")
+        
+        async def fetch():
+            _, alhussain = _load_screener_daily_bundle(db, period, limit)
+            return alhussain
+            
+        data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
+        
+        # Need to re-filter the cached data using start_date/end_date
+        import copy
+        data_copy = copy.deepcopy(data)
+        
+        for d in data_copy['data']:
+            if 'date_obj' not in d and 'time' in d:
+                from datetime import datetime
+                d['date_obj'] = datetime.fromisoformat(d['time']).date()
+            elif isinstance(d.get('date_obj'), str):
+                from datetime import datetime
+                d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
+                
+        filtered_items = _apply_period_filter(data_copy['data'], period, start_date, end_date)
+        return {"count": len(filtered_items), "data": filtered_items}
     except Exception as e:
         print(f"Error loading alhussain count: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -431,13 +574,55 @@ async def get_ad_rating_history(
     db: Session = Depends(get_db),
     period: str = Query("ALL", description="5D, 1M, 6M, 1Y, 5Y, 10Y, ALL"),
     limit: int = Query(5000, ge=1, le=5000),
+    start_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
 ):
     """
     Historical A/D Rating counts and percentages (A vs D grades).
     Reads from rs_daily.acc_dis_rating — cached, single grouped query.
     """
     try:
-        return await _load_ad_rating(db, period, limit)
+        return await _load_ad_rating(db, period, limit, start_date, end_date)
     except Exception as e:
         print(f"Error loading A/D rating history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/screener-trend")
+async def get_screener_trend(
+    db: Session = Depends(get_db),
+    period: str = Query("ALL", description="5D, 1M, 6M, 1Y, 5Y, 10Y, ALL"),
+    limit: int = Query(6000, ge=1, le=6000),
+    start_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    end_date: Optional[date] = Query(None, description="YYYY-MM-DD"),
+):
+    """
+    Historical screener trend data (Minervini 1M/4M/5MW + Alrayan).
+    Lightweight endpoint that reads only from screener_daily_trend_counts.
+    """
+    try:
+        cache_key = _screener_bundle_cache_key(period, limit, "screener_trend")
+        
+        async def fetch():
+            trend, _ = _load_screener_daily_bundle(db, period, limit)
+            return trend
+            
+        data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
+        
+        # Need to re-filter the cached data using start_date/end_date
+        import copy
+        data_copy = copy.deepcopy(data)
+        
+        for d in data_copy['data']:
+            if 'date_obj' not in d and 'time' in d:
+                from datetime import datetime
+                d['date_obj'] = datetime.fromisoformat(d['time']).date()
+            elif isinstance(d.get('date_obj'), str):
+                from datetime import datetime
+                d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
+                
+        filtered_items = _apply_period_filter(data_copy['data'], period, start_date, end_date)
+        return {"count": len(filtered_items), "data": filtered_items}
+    except Exception as e:
+        print(f"Error loading screener trend: {e}")
         raise HTTPException(status_code=500, detail=str(e))

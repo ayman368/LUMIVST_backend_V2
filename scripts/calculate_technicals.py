@@ -162,7 +162,7 @@ class TechnicalCalculator:
             lambda x: x.rolling(window=30).mean()
         )
         weekly_closes['sma_40w_calc'] = weekly_closes.groupby('symbol')['close'].transform(
-            lambda x: x.rolling(window=40).mean()
+            lambda x: x.rolling(window=40).mean()   
         )
         df = df.merge(
             weekly_closes[['symbol', 'week_ending', 'sma_30w_calc', 'sma_40w_calc']],

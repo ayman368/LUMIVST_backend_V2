@@ -77,3 +77,5 @@ opentelemetry-api
 opentelemetry-sdk
 
 yfinance
+
+numpy-financial

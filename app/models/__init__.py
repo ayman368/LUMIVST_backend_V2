@@ -20,3 +20,10 @@ from app.models.market_reports import (
 from app.models.naaim_exposure import NaaimExposure
 from app.models.market_pulse import MarketPulse
 from app.models.tasi_settings import TasiSettings
+from app.models.weekly_market_report import WeeklyMarketReport
+
+# ── Valuation System Models ──
+from app.models.eps_estimates import EpsEstimate
+from app.models.system_config import SystemConfig
+from app.models.valuation_zones import ValuationZone
+from app.models.tasi_components import TasiComponent

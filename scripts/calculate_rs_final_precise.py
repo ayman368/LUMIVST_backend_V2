@@ -12,6 +12,7 @@ import psutil
 import psycopg2
 import csv
 from sqlalchemy.pool import QueuePool
+from sqlalchemy.exc import OperationalError
 from io import StringIO
 from pathlib import Path
 

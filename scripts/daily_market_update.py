@@ -27,6 +27,8 @@ from scripts.calculate_rs_final_precise import RSCalculatorUltraFast
 from scrapers.Reports import main as run_reports_scraper
 # 📊 استيراد تحديث الـ Market Pulse
 from scripts.backfill_market_pulse import main as run_market_pulse_backfill
+# 📊 استيراد Daily Financial Indicators
+from app.scrapers.daily_financial_indicators_scraper import run_scraper_and_save_to_db as run_financial_indicators_scraper
 
 # إعداد الـ Logging
 logging.basicConfig(level=logging.INFO)
@@ -90,6 +92,20 @@ def update_market_pulse():
         logger.error(traceback.format_exc())
         return False
 
+def update_financial_indicators():
+    """
+    تشغيل سكريبت Daily Financial Indicators لتحديث أوزان السوق ومكررات الربحية
+    """
+    try:
+        logger.info("💰 Starting Daily Financial Indicators Scraper...")
+        run_financial_indicators_scraper()
+        logger.info("✅ Daily Financial Indicators completed successfully!")
+        return True
+    except Exception as e:
+        logger.error(f"⚠️ Daily Financial Indicators encountered an error: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
 def update_daily(target_date_str=None):
     """
     1. Scrape Daily Data
@@ -119,6 +135,9 @@ def update_daily(target_date_str=None):
         # 0.2 Run Market Pulse Update
         update_market_pulse()
         
+        # 0.3 Run Daily Financial Indicators
+        update_financial_indicators()
+        
         # 0.5 Load Mappings
         hierarchy_map = load_full_hierarchy_mapping()
         
@@ -139,7 +158,8 @@ def update_daily(target_date_str=None):
             return
 
         logger.info(f"📊 Scraped {len(scraped_data)} records.")
-        
+
+
 
         # 3. Saving Prices
         success_count = 0
@@ -153,13 +173,15 @@ def update_daily(target_date_str=None):
             h = hierarchy_map.get(symbol, {})
             
             try:
+                close_val = float(item.get("Close", 0.0) or 0)
+
                 price_data = {
                     "symbol": symbol,
                     "date": market_date,
                     "open": item.get("Open", 0.0),
                     "high": item.get("Highest", 0.0),
                     "low": item.get("Lowest", 0.0),
-                    "close": item.get("Close", 0.0),
+                    "close": close_val,
                     # Derive absolute change from close + change% when scraper doesn't return it directly
                     "change": item.get("Change") if item.get("Change") is not None else round(
                         float(item.get("Close", 0) or 0) * float(item.get("Change %", 0) or 0) / 

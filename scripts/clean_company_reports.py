@@ -18,8 +18,10 @@ S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 
-def clean_company_reports(symbol, excel_only=False, force=False):
+def clean_company_reports(symbol, excel_only=False, force=False, lang=None):
     target_str = "EXCEL reports" if excel_only else "ALL reports"
+    if lang:
+        target_str += f" in language '{lang}'"
     print(f"⚠️  WARNING: You are about to DELETE {target_str} for symbol '{symbol}'.")
     print("This includes Database records AND Cloudflare R2 files.")
     
@@ -42,6 +44,8 @@ def clean_company_reports(symbol, excel_only=False, force=False):
                 if excel_only:
                     # Using the Enum object directly is safer with SQLAlchemy
                     query = query.filter(CompanyOfficialFiling.file_type == FileType.EXCEL)
+                if lang:
+                    query = query.filter(CompanyOfficialFiling.language == lang)
                 
                 deleted_count = query.delete(synchronize_session=False)
                 db.commit()
@@ -69,19 +73,22 @@ def clean_company_reports(symbol, excel_only=False, force=False):
             
             print(f"⏳ Deleting files from R2 bucket '{S3_BUCKET_NAME}' with prefix '{symbol}/'...")
             
-            if excel_only:
-                # Iterate and delete only excel extensions
-                deleted_count = 0
-                for obj in bucket.objects.filter(Prefix=f"{symbol}/"):
-                    key = obj.key.lower()
-                    if key.endswith('.xls') or key.endswith('.xlsx'):
-                        obj.delete()
-                        deleted_count += 1
-                print(f"✅ Deleted {deleted_count} Excel files from R2.")
-            else:
-                # Delete all objects with prefix
-                bucket.objects.filter(Prefix=f"{symbol}/").delete()
-                print(f"✅ Deleted all files from R2.")
+            deleted_count = 0
+            for obj in bucket.objects.filter(Prefix=f"{symbol}/"):
+                key = obj.key.lower()
+                
+                # Check Language (Format: symbol/year/lang/filename)
+                if lang and f"/{lang.lower()}/" not in key:
+                    continue
+                    
+                if excel_only:
+                    if not (key.endswith('.xls') or key.endswith('.xlsx')):
+                        continue
+                        
+                obj.delete()
+                deleted_count += 1
+                
+            print(f"✅ Deleted {deleted_count} files from R2.")
             
         except Exception as e:
             print(f"❌ S3/R2 Error: {e}")
@@ -94,8 +101,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Clean company reports from DB and R2')
     parser.add_argument('symbol', type=str, help='Company Symbol')
     parser.add_argument('--excel-only', action='store_true', help='Delete only Excel files and records')
+    parser.add_argument('--lang', type=str, choices=['en', 'ar'], help='Delete only for a specific language')
     parser.add_argument('--force', action='store_true', help='Skip confirmation prompt')
     
     args = parser.parse_args()
     
-    clean_company_reports(args.symbol, args.excel_only, args.force)
+    clean_company_reports(args.symbol, args.excel_only, args.force, args.lang)

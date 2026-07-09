@@ -57,7 +57,7 @@ class FinancialReportsScraper:
         self.lang_config = LANG_CONFIG[lang]
         
         # Both EN and AR use the same base URL — language is controlled by browser locale (en-US / ar-SA)
-        BASE_URL = "https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/!ut/p/z1/04_Sj9CPykssy0xPLMnMz0vMAfIjo8ziTR3NDIw8LAz83d2MXA0C3SydAl1c3Q0NvE30I4EKzBEKDMKcTQzMDPxN3H19LAzdTU31w8syU8v1wwkpK8hOMgUA-oskdg!!/"
+        BASE_URL = "https://www.saudiexchange.sa/wps/portal/saudiexchange/hidden/company-profile-main/"
         self.base_url = f"{BASE_URL}?companySymbol={symbol}"
         
         # Download directory - separate by language
@@ -84,27 +84,67 @@ class FinancialReportsScraper:
             page = await self.context.new_page()
             
             try:
-                print(f"Navigating to {self.base_url}...")
                 print(f"Language: {self.lang} ({self.lang_config['locale']})")
-                
-                # Retry logic for navigation
-                for attempt in range(3):
-                    try:
-                        await page.goto(self.base_url, timeout=TIMEOUT_MS)
-                        await page.wait_for_load_state("domcontentloaded")
-                        break
-                    except Exception as nav_e:
-                        print(f"  -> Navigation attempt {attempt+1} failed: {nav_e}")
-                        if attempt == 2:
-                             print("  -> Max retries reached. Returning empty data.")
-                             await browser.close()
-                             return reports_data
-                        await asyncio.sleep(5)
-                
-                # Navigate to Financials Tab
+                print("Using homepage search as the primary navigation path...")
+
+                home_url = "https://www.saudiexchange.sa/wps/portal/saudiexchange/home/"
                 tab_name = self.lang_config['tab_name']
                 print(f"Processing '{tab_name}' Tab...")
-                if await self._click_tab(page, tab_name):
+
+                # Open the homepage and use the site search flow directly.
+                for attempt in range(3):
+                    try:
+                        await page.goto(home_url, timeout=TIMEOUT_MS)
+                        await page.wait_for_load_state("domcontentloaded")
+                        await page.wait_for_timeout(2000)
+                        break
+                    except Exception as nav_e:
+                        print(f"  -> Homepage navigation attempt {attempt+1} failed: {nav_e}")
+                        if attempt == 2:
+                            print("  -> Max retries reached. Returning empty data.")
+                            await browser.close()
+                            return reports_data
+                        await asyncio.sleep(5)
+
+                # Try to find and fill the search input
+                await page.evaluate(f"""(sym) => {{
+                    const inputs = document.querySelectorAll('input[type="text"], input[type="search"]');
+                    for(let i of inputs) {{
+                        if((i.placeholder && i.placeholder.toLowerCase().includes('search')) || 
+                           (i.id && i.id.toLowerCase().includes('search')) ||
+                           (i.placeholder && i.placeholder.includes('بحث'))) {{
+                            i.value = sym;
+                            i.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            i.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            i.focus();
+                            break;
+                        }}
+                    }}
+                }}""", self.symbol)
+
+                await page.keyboard.press("Enter")
+                await page.wait_for_timeout(4000)
+
+                # Try to click the company link in the search results
+                await page.evaluate(f"""(sym) => {{
+                    const links = document.querySelectorAll('a');
+                    for(let l of links) {{
+                        const txt = l.innerText.trim();
+                        if(txt.includes(sym) || (l.href && l.href.includes(sym))) {{
+                            if(txt.length < 50) {{
+                                l.click();
+                                return;
+                            }}
+                        }}
+                    }}
+                }}""", self.symbol)
+
+                await page.wait_for_timeout(5000)
+                await page.wait_for_load_state("domcontentloaded")
+
+                tab_found = await self._click_tab(page, tab_name)
+
+                if tab_found:
                     await page.wait_for_timeout(3000) 
                     
                     # Target Section
@@ -113,7 +153,7 @@ class FinancialReportsScraper:
                     reports_data = await self._scrape_statements_and_reports(page)
                     
                 else:
-                    print(f"Could not find '{tab_name}' tab.")
+                    print(f"Could not find '{tab_name}' tab even after search fallback.")
                     # DEBUG: Print all potential tab candidates
                     print("  -> DEBUG: Listing all potential tabs/links on page:")
                     try:
@@ -539,7 +579,7 @@ async def main():
         # --- Step 3: Ingest Reports ---
         print(f"\n📨 3. Ingesting data for {sym} ({lang_label})...")
         try:
-            ingest_data(str(sym), language=lang)
+            ingest_data(str(sym), lang)
         except Exception as e:
             print(f"❌ Failed to ingest data for {sym}: {e}")
             

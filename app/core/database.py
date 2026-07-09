@@ -32,6 +32,12 @@ from app.models.tasi_settings import TasiSettings
 from app.models.wallet import WalletPosition, WalletTrade, WalletSetting, WalletWeeklyStudy
 from app.models.screener_daily_trend import ScreenerDailyTrend
 
+# ── Valuation System Models ──
+from app.models.eps_estimates import EpsEstimate
+from app.models.system_config import SystemConfig
+from app.models.valuation_zones import ValuationZone
+from app.models.tasi_components import TasiComponent
+
 def create_tables():
     """إنشاء الجداول"""
     try:

@@ -12,6 +12,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             excluded_prefixes = [
                 "/api/scraper",
                 "/api/public",
+                "/api/ingest",
             ]
 
             if not any(path.startswith(prefix) for prefix in excluded_prefixes):

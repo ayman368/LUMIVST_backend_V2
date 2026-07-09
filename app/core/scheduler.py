@@ -121,6 +121,16 @@ def job_monthly_scrapers():
     logger.info("🗓️ [Scheduler] MONTHLY scrapers finished.")
 
 
+# ─── Job: Market Reports ──────────────────────────────────────
+def job_market_reports_scrapers():
+    logger.info("=" * 50)
+    logger.info("📊 [Scheduler] MARKET REPORTS scrapers starting…")
+    _safe("Market Reports (Tadawul)", lambda: __import__(
+        "scripts.update_market_reports", fromlist=["main"]
+    ).main())
+    logger.info("📊 [Scheduler] MARKET REPORTS scrapers finished.")
+
+
 # ─── Helpers ───────────────────────────────────────────────────
 def _safe(name: str, fn):
     """Run a scraper function with error handling."""
@@ -184,6 +194,11 @@ def start_scheduler():
         job_naaim_scraper,
         CronTrigger(day_of_week="thu", hour=1, minute=45, timezone=EGYPT_TZ),
         id="naaim_weekly", name="Weekly NAAIM Exposure Index", replace_existing=True,
+    )
+    _scheduler.add_job(
+        job_market_reports_scrapers,
+        CronTrigger(day_of_week="sun-thu", hour=18, minute=0, timezone=EGYPT_TZ),
+        id="market_reports", name="Saudi Market Reports Scrapers", replace_existing=True,
     )
 
     _scheduler.start()

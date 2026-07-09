@@ -69,15 +69,17 @@ def calculate_all_indicators_for_stock(db: Session, symbol: str, target_date: da
         result = db.execute(query_limit, {"symbol": symbol})
 
     rows = result.fetchall()
+    # تحويل البيانات إلى قواميس لتجنب أخطاء Pandas مع كائنات Row في SQLAlchemy 2.0
+    rows_dicts = [dict(r._mapping) for r in rows]
     # البيانات جاية DESC من الـ LIMIT — نعكسها ASC للحسابات
-    rows = list(reversed(rows))
+    rows_dicts = list(reversed(rows_dicts))
     
-    if not rows or len(rows) < 100:
-        print(f"⚠️  {symbol}: Not enough data ({len(rows)} rows)")
+    if not rows_dicts or len(rows_dicts) < 100:
+        print(f"⚠️  {symbol}: Not enough data ({len(rows_dicts)} rows)")
         return {}
     
     # تحويل البيانات إلى DataFrame
-    df = IndicatorsDataService.prepare_price_dataframe(rows)
+    df = IndicatorsDataService.prepare_price_dataframe(rows_dicts)
     if df is None:
         return {}
     

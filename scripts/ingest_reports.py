@@ -10,7 +10,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # Assumes script is in backend/scripts, so we go .. -> data
 JSON_FILE_PATH = os.path.join(script_dir, "..", "data", "scrape_financial_reports.json")
 
-def ingest_data(symbol):
+def ingest_data(symbol, lang='en'):
     print(f"📂 Reading data from {JSON_FILE_PATH}...")
     
     if not os.path.exists(JSON_FILE_PATH):
@@ -22,6 +22,7 @@ def ingest_data(symbol):
 
     payload = {
         "symbol": str(symbol),
+        "language": lang,
         "data": scraped_data
     }
     

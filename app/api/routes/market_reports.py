@@ -3,6 +3,13 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+import threading
+import logging
+
+from app.core.security import verify_internal_key
+from scripts.update_market_reports import main as update_market_reports_main
+
+logger = logging.getLogger(__name__)
 
 from app.core.database import get_db
 from app.models.market_reports import (
@@ -112,3 +119,34 @@ def get_historical_reports(
         query = query.filter(HistoricalReport.report_date <= end_date)
             
     return query.order_by(desc(HistoricalReport.report_date)).all()
+
+@router.get("/scrape")
+def trigger_scrape_market_reports(_: bool = Depends(verify_internal_key)):
+    def scrape_with_error_handling():
+        try:
+            logger.info("Starting market reports scraping via API trigger")
+            update_market_reports_main()
+            logger.info("Market reports scraping completed successfully")
+        except Exception as e:
+            logger.error(f"Market reports scraping failed: {e}")
+            
+    thread = threading.Thread(target=scrape_with_error_handling, daemon=True)
+    thread.start()
+    return {"message": "Market reports scraping started in background"}
+
+
+@router.get("/scrape/daily-financial-indicators")
+def trigger_scrape_daily_financial_indicators(_: bool = Depends(verify_internal_key)):
+    def scrape_with_error_handling():
+        try:
+            logger.info("Starting Daily Financial Indicators scraping via API trigger")
+            from app.scrapers.daily_financial_indicators_scraper import run_scraper_and_save_to_db
+            run_scraper_and_save_to_db()
+            logger.info("Daily Financial Indicators scraping completed successfully")
+        except Exception as e:
+            logger.error(f"Daily Financial Indicators scraping failed: {e}")
+
+    thread = threading.Thread(target=scrape_with_error_handling, daemon=True)
+    thread.start()
+    return {"message": "Daily Financial Indicators scraping started in background"}
+
