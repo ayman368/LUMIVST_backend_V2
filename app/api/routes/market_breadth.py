@@ -56,31 +56,26 @@ def _apply_period_filter(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
 ) -> list:
-    target_date = _period_min_date(period)
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
+
     filtered_data = data_all
 
-    if start_date:
-        filtered_data = [
-            d for d in filtered_data
-            if d.get('date_obj') is not None and d['date_obj'] >= start_date
-        ]
-
-    if end_date:
-        filtered_data = [
-            d for d in filtered_data
-            if d.get('date_obj') is not None and d['date_obj'] <= end_date
-        ]
-
-    if target_date:
-        target_str = target_date.isoformat()
-        filtered_data = [d for d in filtered_data if str(d['date_obj']) >= target_str]
+    if start_date or end_date:
+        if start_date:
+            start_str = start_date.isoformat()
+            filtered_data = [d for d in filtered_data if d.get('time', '') >= start_str]
+        if end_date:
+            end_str = end_date.isoformat()
+            filtered_data = [d for d in filtered_data if d.get('time', '') <= end_str]
     else:
-        filtered_data = filtered_data
+        target_date = _period_min_date(period)
+        if target_date:
+            target_str = target_date.isoformat()
+            filtered_data = [d for d in filtered_data if d.get('time', '') >= target_str]
 
-    for d in filtered_data:
-        d.pop('date_obj', None)
-
-    return filtered_data
+    # Return a new dict without date_obj to avoid mutating the cached original object
+    return [{k: v for k, v in d.items() if k != 'date_obj'} for d in filtered_data]
 
 
 def _compute_breadth_from_prices_df(df: pd.DataFrame) -> list:
@@ -292,28 +287,15 @@ async def _load_ad_rating(
 ) -> dict:
     min_date = _period_min_date(period)
     
-    # We cache the raw full data for this limit/period
-    cache_key = f"market_breadth:ad_rating:v2:limit:{limit}:period:{period.upper()}"
+    # We always cache ALL data for this limit to avoid multiple database scans
+    cache_key = f"market_breadth:ad_rating:v2:limit:{limit}:period:ALL"
 
     async def fetch():
-        return _build_ad_rating_series(db, limit, min_date=min_date)
+        return _build_ad_rating_series(db, limit, min_date=None)
 
     data_all = await cache_read_through(cache_key, AD_RATING_CACHE_TTL, fetch)
     
-    # Deep copy to avoid mutating cached objects when we pop date_obj
-    import copy
-    data_all_copy = copy.deepcopy(data_all)
-    
-    # Re-hydrate date_obj if it got serialized to string from cache
-    for d in data_all_copy:
-        if 'date_obj' not in d and 'time' in d:
-            from datetime import datetime
-            d['date_obj'] = datetime.fromisoformat(d['time']).date()
-        elif isinstance(d.get('date_obj'), str):
-            from datetime import datetime
-            d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
-
-    filtered_data = _apply_period_filter(data_all_copy, period, start_date, end_date)
+    filtered_data = _apply_period_filter(data_all, period, start_date, end_date)
     return {"count": len(filtered_data), "data": filtered_data}
 
 
@@ -458,45 +440,36 @@ async def get_market_breadth_dashboard(
     try:
         limit = min(ad_limit, alhussain_limit, screener_trend_limit)
         
-        # We cache the data WITHOUT start_date/end_date filtering, then filter after
-        cache_key = _dashboard_cache_key(period, limit, limit, approval_with_controls)
+        # We cache the data WITHOUT period or start_date/end_date filtering, then filter after
+        cache_key = _dashboard_cache_key("ALL", limit, limit, approval_with_controls)
 
         async def fetch():
             # fetch without date filtering
             return await _build_dashboard_payload(
-                db, period, limit, limit, approval_with_controls
+                db, "ALL", limit, limit, approval_with_controls
             )
 
         data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
         
-        # If dates are provided, we need to filter the cached response
-        if start_date or end_date:
-            import copy
-            data_copy = copy.deepcopy(data)
-            
+        # If dates or period are provided, we need to filter the cached response
+        if period != "ALL" or start_date or end_date:
             def filter_dataset(dataset):
                 if not dataset or not isinstance(dataset, dict) or 'data' not in dataset:
                     return dataset
                 
-                for d in dataset['data']:
-                    if 'date_obj' not in d and 'time' in d:
-                        from datetime import datetime
-                        d['date_obj'] = datetime.fromisoformat(d['time']).date()
-                    elif isinstance(d.get('date_obj'), str):
-                        from datetime import datetime
-                        d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
-                
                 filtered = _apply_period_filter(dataset['data'], period, start_date, end_date)
                 return {"count": len(filtered), "data": filtered}
 
-            data_copy['ma_breadth'] = filter_dataset(data_copy.get('ma_breadth'))
-            data_copy['ad_rating'] = filter_dataset(data_copy.get('ad_rating'))
-            data_copy['alhussain'] = filter_dataset(data_copy.get('alhussain'))
-            data_copy['screener_trend'] = filter_dataset(data_copy.get('screener_trend'))
-            
-            return data_copy
+            return {
+                "ma_breadth": filter_dataset(data.get('ma_breadth')),
+                "ad_rating": filter_dataset(data.get('ad_rating')),
+                "alhussain": filter_dataset(data.get('alhussain')),
+                "screener_trend": filter_dataset(data.get('screener_trend'))
+            }
             
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error loading market breadth dashboard: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -518,10 +491,18 @@ async def get_percent_above_ma(
     Uses market_breadth table for fast aggregated data.
     """
     try:
-        cache_key = _percent_above_ma_cache_key(period, approval_with_controls, start_date, end_date)
+        # Always cache ALL internally to avoid multiple heavy scans
+        cache_key = _percent_above_ma_cache_key("ALL", approval_with_controls, None, None)
         async def fetch():
-            return _load_percent_above_ma(db, period, approval_with_controls, start_date, end_date)
-        return await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
+            return _load_percent_above_ma(db, "ALL", approval_with_controls, None, None)
+        data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
+        
+        if period != "ALL" or start_date or end_date:
+            filtered = _apply_period_filter(data['data'], period, start_date, end_date)
+            return {"count": len(filtered), "data": filtered}
+        return data
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error computing market breadth: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -541,29 +522,19 @@ async def get_alhussain_count(
     Run scripts/backfill_alhussain_daily.py once to populate history.
     """
     try:
-        # Cache key should include dates if we filter in fetch, but here we can filter after cache
-        cache_key = _screener_bundle_cache_key(period, limit, "alhussain_count")
+        # Cache key always uses ALL to avoid multiple DB queries
+        cache_key = _screener_bundle_cache_key("ALL", limit, "alhussain_count")
         
         async def fetch():
-            _, alhussain = _load_screener_daily_bundle(db, period, limit)
+            _, alhussain = _load_screener_daily_bundle(db, "ALL", limit)
             return alhussain
             
         data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
         
-        # Need to re-filter the cached data using start_date/end_date
-        import copy
-        data_copy = copy.deepcopy(data)
-        
-        for d in data_copy['data']:
-            if 'date_obj' not in d and 'time' in d:
-                from datetime import datetime
-                d['date_obj'] = datetime.fromisoformat(d['time']).date()
-            elif isinstance(d.get('date_obj'), str):
-                from datetime import datetime
-                d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
-                
-        filtered_items = _apply_period_filter(data_copy['data'], period, start_date, end_date)
+        filtered_items = _apply_period_filter(data['data'], period, start_date, end_date)
         return {"count": len(filtered_items), "data": filtered_items}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error loading alhussain count: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -583,6 +554,8 @@ async def get_ad_rating_history(
     """
     try:
         return await _load_ad_rating(db, period, limit, start_date, end_date)
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error loading A/D rating history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -601,28 +574,19 @@ async def get_screener_trend(
     Lightweight endpoint that reads only from screener_daily_trend_counts.
     """
     try:
-        cache_key = _screener_bundle_cache_key(period, limit, "screener_trend")
+        # Cache key always uses ALL to avoid multiple DB queries
+        cache_key = _screener_bundle_cache_key("ALL", limit, "screener_trend")
         
         async def fetch():
-            trend, _ = _load_screener_daily_bundle(db, period, limit)
-            return trend
+            screener_trend, _ = _load_screener_daily_bundle(db, "ALL", limit)
+            return screener_trend
             
         data = await cache_read_through(cache_key, DASHBOARD_CACHE_TTL, fetch)
         
-        # Need to re-filter the cached data using start_date/end_date
-        import copy
-        data_copy = copy.deepcopy(data)
-        
-        for d in data_copy['data']:
-            if 'date_obj' not in d and 'time' in d:
-                from datetime import datetime
-                d['date_obj'] = datetime.fromisoformat(d['time']).date()
-            elif isinstance(d.get('date_obj'), str):
-                from datetime import datetime
-                d['date_obj'] = datetime.fromisoformat(d['date_obj']).date()
-                
-        filtered_items = _apply_period_filter(data_copy['data'], period, start_date, end_date)
+        filtered_items = _apply_period_filter(data['data'], period, start_date, end_date)
         return {"count": len(filtered_items), "data": filtered_items}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error loading screener trend: {e}")
         raise HTTPException(status_code=500, detail=str(e))

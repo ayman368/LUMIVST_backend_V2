@@ -12,6 +12,8 @@ from scripts.update_market_reports import main as update_market_reports_main
 logger = logging.getLogger(__name__)
 
 from app.core.database import get_db
+from app.core.cache_helpers import cache_read_through
+from datetime import timedelta
 from app.models.market_reports import (
     SubstantialShareholder,
     NetShortPosition,
@@ -119,6 +121,48 @@ def get_historical_reports(
         query = query.filter(HistoricalReport.report_date <= end_date)
             
     return query.order_by(desc(HistoricalReport.report_date)).all()
+
+def _period_min_date(period: str) -> Optional[date]:
+    today = date.today()
+    period = period.upper()
+    if period == "5D": return today - timedelta(days=7)
+    if period == "1M": return today - timedelta(days=30)
+    if period == "6M": return today - timedelta(days=180)
+    if period == "1Y": return today - timedelta(days=365)
+    if period == "5Y": return today - timedelta(days=365 * 5)
+    if period == "10Y": return today - timedelta(days=365 * 10)
+    return None
+
+@router.get("/historical-reports/tasi-chart")
+async def get_tasi_chart(
+    period: str = Query("ALL", description="5D, 1M, 6M, 1Y, 5Y, 10Y, ALL"),
+    db: Session = Depends(get_db)
+):
+    try:
+        cache_key = f"market_reports:tasi_chart:period:ALL"
+        async def fetch():
+            query = db.query(
+                HistoricalReport.report_date,
+                HistoricalReport.close_price
+            ).order_by(HistoricalReport.report_date.asc())
+            
+            results = query.all()
+            return [
+                {"time": row[0].isoformat(), "value": float(row[1].replace(',', '')) if row[1] else 0}
+                for row in results
+            ]
+            
+        data = await cache_read_through(cache_key, 86400, fetch)
+        
+        if period.upper() != "ALL":
+            target_date = _period_min_date(period)
+            if target_date:
+                target_date_str = target_date.isoformat()
+                return [d for d in data if d["time"] >= target_date_str]
+        return data
+    except Exception as e:
+        logger.error(f"Error loading TASI chart data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/scrape")
 def trigger_scrape_market_reports(_: bool = Depends(verify_internal_key)):

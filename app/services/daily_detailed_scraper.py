@@ -59,7 +59,7 @@ def build_driver(headless=True):
     options.add_argument("--disable-features=TranslateUI")
     options.add_argument("--disable-ipc-flooding-protection")
     options.add_argument("--js-flags=--max-old-space-size=128")
-    options.add_argument("--single-process")
+    # Note: --single-process removed - causes Chrome crashes on Windows
     options.add_argument("--memory-pressure-off")
     
     if headless:
