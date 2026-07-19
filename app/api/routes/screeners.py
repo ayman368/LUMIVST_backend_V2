@@ -15,6 +15,7 @@ import logging
 from app.core.database import get_db, SessionLocal
 from app.models.stock_indicators import StockIndicator
 from app.models.rs_daily import RSDaily
+from app.models.price import Price
 from app.core.cache_helpers import (
     cache_read_through,
     make_screener_key,
@@ -841,3 +842,101 @@ async def get_historical_ad_rating(
 
     result = await cache_read_through(cache_key, 3600, fetch_historical)
     return result
+
+
+# ============ SCREENER 11: NEW HIGHS ============
+@router.get("/new-highs")
+async def get_new_highs(
+    period: str = Query("1-month", description="1-week, 1-month, 3-months, 6-months, 52-weeks"),
+    db: Session = Depends(get_db),
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    target_date: Optional[str] = Query(None)
+):
+    """
+    🚀 New Highs Screener
+    """
+    cache_key = make_screener_key(f"new-highs-{period}", target_date, limit, offset)
+
+    async def fetch_screener():
+        if target_date:
+            if isinstance(target_date, str):
+                latest = date.fromisoformat(target_date)
+            else:
+                latest = target_date
+        else:
+            latest = get_latest_date(db)
+
+        if not latest:
+            return {"title": f"New Highs - {period}", "total_count": 0, "results": []}
+
+        # Determine lookback days (calendar days approximation)
+        p = period.lower()
+        if p == "1-week":
+            lookback_days = 7
+        elif p == "1-month":
+            lookback_days = 30
+        elif p == "3-months":
+            lookback_days = 90
+        elif p == "6-months":
+            lookback_days = 180
+        elif p == "52-weeks":
+            lookback_days = 365
+        else:
+            lookback_days = 30
+
+        start_date = latest - timedelta(days=lookback_days)
+
+        # Get max high for each symbol within the lookback period
+        max_highs = (
+            db.query(Price.symbol, func.max(Price.high).label('max_high'))
+            .filter(Price.date >= start_date, Price.date <= latest)
+            .group_by(Price.symbol)
+            .subquery()
+        )
+
+        # Get today's prices
+        today_prices = (
+            db.query(Price.symbol, Price.high)
+            .filter(Price.date == latest)
+            .subquery()
+        )
+
+        # Join to find symbols where today's high >= max_high
+        new_high_symbols_query = (
+            db.query(today_prices.c.symbol)
+            .join(max_highs, today_prices.c.symbol == max_highs.c.symbol)
+            .filter(today_prices.c.high >= max_highs.c.max_high)
+            .all()
+        )
+        new_high_symbols = {s[0] for s in new_high_symbols_query}
+
+        if not new_high_symbols:
+            return {"title": f"New Highs - {period}", "total_count": 0, "results": []}
+
+        # Get RS map and indicators for these symbols
+        rs_map = get_rs_map(db, latest)
+        
+        inds = (
+            db.query(StockIndicator)
+            .filter(StockIndicator.date == latest)
+            .filter(StockIndicator.symbol.in_(new_high_symbols))
+            .all()
+        )
+
+        results = []
+        for ind in inds:
+            rs_data = rs_map.get(ind.symbol)
+            results.append(screener_to_dict(ind, rs_data))
+
+        # Sort by RS rating descending
+        results.sort(key=lambda x: (x.get('rs_rating') or 0), reverse=True)
+
+        return {
+            "title": f"New Highs - {period}",
+            "total_count": len(results),
+            "results": results[offset : offset + limit],
+            "date": str(latest),
+        }
+
+    return await cache_read_through(cache_key, CACHE_TTL_SCREENERS, fetch_screener)

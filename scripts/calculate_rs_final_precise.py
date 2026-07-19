@@ -946,6 +946,12 @@ class RSCalculatorUltraFast:
         if 'date' in df_clean.columns:
             df_clean['date'] = df_clean['date'].astype(str)
         
+        # Convert integer columns (ranks, rs_rating) from float to int
+        int_cols = ['rs_rating', 'rank_1m', 'rank_3m', 'rank_6m', 'rank_9m', 'rank_12m']
+        for col in int_cols:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].apply(lambda x: str(int(x)) if pd.notna(x) else x)
+        
         # استبدال NaN/None بقيم فارغة
         # COPY expects NULL as \N by default or empty string if specified
         # We will use explicit \N for clarity
@@ -967,6 +973,10 @@ class RSCalculatorUltraFast:
             user_pass, host_db = db_url.split('@')
             user, password = user_pass.split(':')
             host_port, database = host_db.split('/')
+            
+            # Strip query parameters (e.g. ?sslmode=require) from database name
+            if '?' in database:
+                database = database.split('?')[0]
             
             host = host_port
             port = '5432'
@@ -990,33 +1000,34 @@ class RSCalculatorUltraFast:
             # cur.execute("TRUNCATE TABLE rs_daily_v2")
             # لا داعي لـ TRUNCATE لأننا مسحناه في Main، ولكن احتياطاً
             
-            # 2. تحضير البيانات في StringIO
-            print("📝 Preparing COPY buffer...")
-            output = StringIO()
-            writer = csv.writer(output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-            
-            # كتابة البيانات للـ Buffer
-            # نكتب سطر سطر لتفادي مشاكل الذاكرة مع to_csv
-            # أو الأسرع: استخدام to_csv الخاص بـ pandas
-            # لكن csv.writer أدق في التعامل مع الـ Quoting
-            
-            # الأسرع فعلاً:
-            for row in df_clean.itertuples(index=False):
-                writer.writerow(row)
-            
-            output.seek(0)
-            
-            # 3. تنفيذ COPY
-            print("⚡ Executing COPY (This is FAST!)...")
+            # 2. تحضير البيانات في StringIO وتنفيذ COPY على دفعات
+            print("📝 Executing COPY in chunks (to prevent Render DB timeout)...")
             copy_start = time.time()
+            chunk_size = 100000
+            total_chunks = (len(df_clean) // chunk_size) + 1
             
-            cur.copy_expert(f"""
-                COPY rs_daily_v2 ({','.join(cols_to_save)})
-                FROM STDIN
-                WITH (FORMAT CSV, NULL '\\N')
-            """, output)
+            for i in range(total_chunks):
+                chunk = df_clean.iloc[i*chunk_size:(i+1)*chunk_size]
+                if chunk.empty:
+                    continue
+                
+                print(f"⚡ COPY Chunk {i+1}/{total_chunks} ({len(chunk):,} rows)...")
+                output = StringIO()
+                writer = csv.writer(output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+                
+                for row in chunk.itertuples(index=False):
+                    writer.writerow(row)
+                
+                output.seek(0)
+                
+                cur.copy_expert(f"""
+                    COPY rs_daily_v2 ({','.join(cols_to_save)})
+                    FROM STDIN
+                    WITH (FORMAT CSV, NULL '\\N')
+                """, output)
+                
+                conn.commit()
             
-            conn.commit()
             copy_time = time.time() - copy_start
             
             cur.execute("SELECT COUNT(*) FROM rs_daily_v2")

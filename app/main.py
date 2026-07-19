@@ -146,6 +146,9 @@ app.include_router(mansfield_rs_router.router, prefix="/api/indicators/mansfield
 app.include_router(sata_router.router, prefix="/api/indicators/sata", tags=["SATA & Stage Analysis"], dependencies=protected_dependencies)
 app.include_router(tasi_settings_router.router, prefix="/api/tasi-settings", tags=["TASI Settings"])
 
+from app.api.routes import aporia as aporia_router
+app.include_router(aporia_router.router, prefix="/api/aporia", tags=["Aporia Analytics"], dependencies=protected_dependencies)
+
 # ── Wallet / Finance System ──
 from app.api.routes.wallet import calculator as wallet_calculator
 from app.api.routes.wallet import rbaf as wallet_rbaf
