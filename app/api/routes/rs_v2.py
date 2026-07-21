@@ -47,6 +47,17 @@ class RSV2Item(BaseModel):
     industry_rs_rating: Optional[str] = None
     sub_industry_rs_rating: Optional[str] = None
     acc_dis_rating: Optional[str] = None
+    
+    # New RS Line Metrics
+    rs_line: Optional[float] = None
+    rs_ma1: Optional[float] = None
+    rs_ma2: Optional[float] = None
+    rs_direction: Optional[str] = None
+    rs_position: Optional[str] = None
+    rs_signal_today: Optional[str] = None
+    rsnhbp_today: Optional[bool] = None
+    last_bull_cross: Optional[date] = None
+    last_bear_cross: Optional[date] = None
 
     class Config:
         from_attributes = True
@@ -112,29 +123,31 @@ async def get_latest_rs_v2(
             
             # Build query - use CAST() instead of :: to avoid SQLAlchemy parameter binding conflict
             query = """
-                SELECT symbol, date, rs_rating, rs_raw, 
-                       return_3m, return_6m, return_9m, return_12m,
-                       rank_1m, rank_3m, rank_6m, rank_9m, rank_12m,
-                       company_name, industry_group,
-                       sector_rs_rating, industry_group_rs_rating, industry_rs_rating, sub_industry_rs_rating, acc_dis_rating
-                FROM rs_daily_v2
-                WHERE CAST(date AS DATE) = CAST(:latest_date AS DATE)
+                SELECT r.symbol, r.date, r.rs_rating, r.rs_raw, 
+                       r.return_3m, r.return_6m, r.return_9m, r.return_12m,
+                       r.rank_1m, r.rank_3m, r.rank_6m, r.rank_9m, r.rank_12m,
+                       r.company_name, r.industry_group,
+                       r.sector_rs_rating, r.industry_group_rs_rating, r.industry_rs_rating, r.sub_industry_rs_rating, r.acc_dis_rating,
+                       m.rs_line, m.rs_ma1, m.rs_ma2, m.rs_direction, m.rs_position, m.rs_signal_today, m.rsnhbp_today, m.last_bull_cross, m.last_bear_cross
+                FROM rs_daily_v2 r
+                LEFT JOIN stock_rs_line_metrics m ON r.symbol = m.symbol AND r.date = m.date
+                WHERE CAST(r.date AS DATE) = CAST(:latest_date AS DATE)
             """
             params = {"latest_date": latest_date}
             
             if min_rs is not None:
-                query += " AND rs_rating >= :min_rs"
+                query += " AND r.rs_rating >= :min_rs"
                 params["min_rs"] = min_rs
                 
             if max_rs is not None:
-                query += " AND rs_rating <= :max_rs"
+                query += " AND r.rs_rating <= :max_rs"
                 params["max_rs"] = max_rs
                 
             if industry:
-                query += " AND industry_group ILIKE :industry"
+                query += " AND r.industry_group ILIKE :industry"
                 params["industry"] = f"%{industry}%"
             
-            query += " ORDER BY rs_rating DESC LIMIT :limit OFFSET :offset"
+            query += " ORDER BY r.rs_rating DESC LIMIT :limit OFFSET :offset"
             params["limit"] = limit
             params["offset"] = offset
             
@@ -161,7 +174,16 @@ async def get_latest_rs_v2(
                 industry_group_rs_rating=row[16],
                 industry_rs_rating=row[17],
                 sub_industry_rs_rating=row[18],
-                acc_dis_rating=row[19]
+                acc_dis_rating=row[19],
+                rs_line=float(row[20]) if row[20] is not None else None,
+                rs_ma1=float(row[21]) if row[21] is not None else None,
+                rs_ma2=float(row[22]) if row[22] is not None else None,
+                rs_direction=row[23],
+                rs_position=row[24],
+                rs_signal_today=row[25],
+                rsnhbp_today=row[26],
+                last_bull_cross=row[27],
+                last_bear_cross=row[28]
             ) for row in rows]
             
             # Get total count

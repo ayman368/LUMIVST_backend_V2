@@ -406,6 +406,16 @@ def update_daily(target_date_str=None):
         from scripts.update_daily_market_breadth import update_todays_market_breadth
         update_todays_market_breadth(db, market_date)
 
+        # 8.6 Calculate RS Line Metrics (TraderLion scale)
+        # -------------------------------------------------------------------
+        try:
+            logger.info("📈 Calculating RS Line Metrics...")
+            from scripts.calculate_rs_line_metrics import calculate_and_store_rs_line_metrics
+            calculate_and_store_rs_line_metrics(db, market_date)
+            logger.info("✅ RS Line Metrics calculated and stored successfully.")
+        except Exception as rs_err:
+            logger.error(f"⚠️ RS Line Metrics calculation failed: {rs_err}")
+
         # 9. Finalize Update Status (Atomic Switch)
         # -------------------------------------------------------------------
         db.execute(text("""

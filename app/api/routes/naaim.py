@@ -343,9 +343,11 @@ def trigger_naaim_scrape(
                     socket_timeout=REDIS_SOCKET_TIMEOUT,
                 )
                 keys = r.keys(CACHE_KEYS["all_pattern"])
-                if keys:
-                    r.delete(*keys)
-                    logger.info(f"🗑️ Cleared {len(keys)} NAAIM cache keys")
+                # Do not delete page_metadata, it was just cached by the scraper
+                keys_to_delete = [k for k in keys if k != CACHE_KEYS["page_metadata"]]
+                if keys_to_delete:
+                    r.delete(*keys_to_delete)
+                    logger.info(f"🗑️ Cleared {len(keys_to_delete)} NAAIM cache keys")
                 r.close()
             except Exception as e:
                 logger.warning(f"⚠️ NAAIM cache clear failed: {e}")

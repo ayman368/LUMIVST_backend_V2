@@ -43,6 +43,18 @@ def _top_market_cap(ranked: list[dict], n: int = 15) -> list[dict]:
     return _strip_internal_keys(with_cap[:n])
 
 
+def _aporia_trend_to_label(raw: str) -> str:
+    """Convert Aporia trend format ('up:XX,YY', 'down:XX,YY', 'flat') to 'Bull'/'Bear'/'Neutral'."""
+    if not raw:
+        return "Neutral"
+    s = str(raw).strip().lower()
+    if s.startswith("up"):
+        return "Bull"
+    if s.startswith("down"):
+        return "Bear"
+    return "Neutral"
+
+
 def build_weekly_report(db: Session, week_end: date) -> dict:
     week_start, week_end = trading_week_bounds(week_end)
     ws = week_start.isoformat()
@@ -121,31 +133,75 @@ def build_weekly_report(db: Session, week_end: date) -> dict:
         for r in rankings["ranked_stocks"]:
             sym = r["symbol"]
             if sym in aporia_map:
-                r["trend_daily"] = aporia_map[sym].get("daily_trend", r["trend_daily"])
-                r["trend_weekly"] = aporia_map[sym].get("weekly_trend", r["trend_weekly"])
-                r["trend_monthly"] = aporia_map[sym].get("monthly_trend", r["trend_monthly"])
+                a = aporia_map[sym]
                 
-                rank_str = aporia_map[sym].get("trend_rank", "")
-                if rank_str and rank_str.isdigit():
+                # Convert Aporia trend format to Bull/Bear/Neutral
+                r["trend_daily"] = _aporia_trend_to_label(a.get("daily_trend", ""))
+                r["trend_weekly"] = _aporia_trend_to_label(a.get("weekly_trend", ""))
+                r["trend_monthly"] = _aporia_trend_to_label(a.get("monthly_trend", ""))
+                
+                # Trend Rank
+                rank_str = str(a.get("trend_rank", "")).strip()
+                try:
                     r["trend_rank"] = int(rank_str)
+                except (ValueError, TypeError):
+                    pass
                     
-                days_str = aporia_map[sym].get("days_since_high_250", "")
-                if days_str and days_str.isdigit():
+                # Days Since 250-Day High
+                days_str = str(a.get("days_since_high_250", "")).strip().replace(",", "")
+                try:
                     r["days_since_250d_high"] = int(days_str)
+                except (ValueError, TypeError):
+                    pass
                     
-                pct_str = aporia_map[sym].get("pfh_250", "")
-                if pct_str:
-                    try:
-                        r["pct_below_250d_high"] = float(pct_str.replace('%', ''))
-                    except:
-                        pass
+                # % Below 250-Day High
+                pct_str = str(a.get("pfh_250", "")).strip().replace('%', '').replace(",", "")
+                try:
+                    r["pct_below_250d_high"] = float(pct_str)
+                except (ValueError, TypeError):
+                    pass
                         
-        # Re-sort using Aporia's official trend_rank
-        rankings["ranked_stocks"].sort(key=lambda x: x.get("trend_rank", 9999))
-        rankings["top_15"] = rankings["ranked_stocks"][:15]
-        rankings["bottom_15"] = [x for x in rankings["ranked_stocks"][-15:] if x not in rankings["top_15"]]
-        rankings["bottom_15"].reverse()
+        # Build directly from Aporia data to guarantee 100% exact match
+        local_returns = {r["symbol"]: r.get("weekly_return", 0.0) for r in rankings["ranked_stocks"]}
+        
+        def _build_aporia_list(category):
+            cat_df = aporia_df[aporia_df['filter_category'] == category]
+            if cat_df.empty: return []
+            res = []
+            for _, row in cat_df.iterrows():
+                # Extract numbers safely
+                try: rank_val = int(str(row.get("trend_rank", "")).strip())
+                except: rank_val = 0
+                
+                try: pct_val = float(str(row.get("pfh_250", "")).strip().replace('%', '').replace(',', ''))
+                except: pct_val = 0.0
+                
+                try: days_val = int(str(row.get("days_since_high_250", "")).strip().replace(',', ''))
+                except: days_val = 0
+                
+                ret_val = local_returns.get(row["ticker"], 0.0)
+                
+                res.append({
+                    "symbol": row["ticker"],
+                    "stock_name": row["name"],
+                    "weekly_return": ret_val,
+                    "trend_daily": _aporia_trend_to_label(row.get("daily_trend", "")),
+                    "trend_weekly": _aporia_trend_to_label(row.get("weekly_trend", "")),
+                    "trend_monthly": _aporia_trend_to_label(row.get("monthly_trend", "")),
+                    "trend_rank": rank_val,
+                    "pct_below_250d_high": pct_val,
+                    "days_since_250d_high": days_val,
+                })
+            return res
 
+        aporia_top = _build_aporia_list('strongest_uptrends')
+        if aporia_top:
+            rankings["top_15"] = aporia_top[:15]
+            
+        aporia_bottom = _build_aporia_list('strongest_downtrends')
+        if aporia_bottom:
+            rankings["bottom_15"] = aporia_bottom[:15]
+            
     ranked = rankings["ranked_stocks"]
 
     tasi_series = compute_tasi_trend_series(df_tasi)
@@ -197,11 +253,39 @@ def build_weekly_report(db: Session, week_end: date) -> dict:
     # Get Aporia's Largest Market Cap List
     top_cap_list = _top_market_cap(ranked)
     if not aporia_df.empty:
-        cap_tickers = aporia_df[aporia_df['filter_category'] == 'largest_market_cap']['ticker'].tolist()
-        if cap_tickers:
-            matched_caps = [r for r in ranked if r["symbol"] in cap_tickers]
-            matched_caps.sort(key=lambda x: cap_tickers.index(x["symbol"]))
-            top_cap_list = _strip_internal_keys(matched_caps[:15])
+        aporia_cap = _build_aporia_list('largest')
+        if aporia_cap:
+            top_cap_list = aporia_cap[:15]
+
+    # Fetch Aporia charts for breakout stocks
+    breakout_stocks_charts = []
+    if not aporia_df.empty:
+        from app.models.aporia import AporiaChart
+        for brk in breakouts_data.get("breakouts", []):
+            ticker = brk["symbol"]
+            chart_record = db.query(AporiaChart).filter(
+                AporiaChart.ticker == ticker,
+                AporiaChart.chart_type == 'breakout'
+            ).first()
+            
+            series_list = []
+            labels_list = []
+            if chart_record and chart_record.chart_data:
+                data = chart_record.chart_data
+                labels_list = data.get("dates", [])
+                series_list = data.get("prices", [])
+                
+            breakout_stocks_charts.append({
+                "symbol": ticker,
+                "stock_name": brk["stock_name"],
+                "series": series_list,
+                "labels": labels_list,
+                "breakout_type": brk["description"]
+            })
+    else:
+        # Fallback to local computation
+        from .calculators.breakouts import compute_breakout_stock_series
+        breakout_stocks_charts = compute_breakout_stock_series(df, breakouts_data["breakouts"], days=None)
 
     report = {
         "week_label": index_data["week_label"],
@@ -225,7 +309,7 @@ def build_weekly_report(db: Session, week_end: date) -> dict:
         "stock_performance": index_data["stock_performance"],
         "top_market_cap": top_cap_list,
         "breakouts": breakouts_data,
-        "breakout_stocks": compute_breakout_stock_series(df, breakouts_data["breakouts"], days=None),
+        "breakout_stocks": breakout_stocks_charts,
         "top_ranked": _strip_internal_keys(rankings["top_15"]),
         "bottom_ranked": _strip_internal_keys(rankings["bottom_15"]),
         "volume_gainers": compute_volume_gainers(df, ws, we),

@@ -1,0 +1,11 @@
+ticker	name	sector	market_cap	val_avg_3mo	trailingPE	last	mtd_rtn	mo3_rtn	year_rtn	daily_trend	weekly_trend	monthly_trend	trend_rank	pfh_250	days_since_high_250	breakout	longest_consolidation_window	position	price_extreme	vol_5_day_chng	vol_20_day_chng
+3050	Southern Province Cement Co.	Materials	101	227	22.4	19.25	-0.0%	-11.4%	-29.1%	down:67,10	down:753,10	down:919,10	272	43.2%	1370	-	-	-	red,red	-32%	-8%
+4700	Al Khabeer Diversified Income Traded Fund	Closed-End Fund	-	271	-	4.8	0.0%	-2.4%	-16.4%	down:98,5	down:348,5	down:367,5	271	24.8%	1365	-	-	-	-	-12%	-13%
+3002	Najran Cement Co.	Materials	166	208	19.1	5.69	-2.4%	-5.2%	-30.4%	down:106,25	down:732,25	down:817,25	270	45.2%	1264	-	-	-	-	+25%	-33%
+3004	Northern Region Cement Co.	Materials	155	244	22.2	6.58	-2.2%	-6.8%	-14.7%	down:38,1	down:325,1	down:880,1	269	29.0%	1252	13-Year Low	-	-	red,red	-13%	+26%
+1201	Takween Advanced Industries Co.	Materials	240	230	-	4.65	-9.0%	-16.8%	-42.9%	down:18,*	down:534,*	down:906,*	268	78.3%	1248	All-Time Low	-	-	red	-41%	+20%
+4141	Al-Omran Industrial Trading Co.	Capital Goods	258	238	-	20.71	-6.3%	-8.8%	-23.3%	down:1,*	down:347,36	down:491,36	267	56.9%	1248	-	94	24%	-	-52%	+171%
+4335	Musharaka REIT Fund	REITs	243	267	-	3.77	-4.3%	-10.4%	-10.9%	down:72,4	down:93,4	down:878,4	266	19.4%	1246	-	-	-	red,red	+4%	-24%
+1210	Basic Chemical Industries Co.	Materials	202	258	38.7	23.31	-3.8%	-10.0%	-13.2%	down:39,*	down:161,88	down:437,88	265	24.4%	1197	-	-	-	red	-3%	+9%
+6002	Herfy Food Services Co.	Consumer Services	177	209	-	13.94	-6.7%	-6.9%	-39.4%	down:20,1	down:552,87	down:954,87	264	88.7%	1167	-	-	-	-	-36%	+2%
+1832	Sadr Logistics Co.	Commercial & Professional Svc	230	150	-	2.61	-5.1%	-3.0%	-9.4%	down:6,5	down:415,87	down:395,87	263	16.9%	1139	-	145	47%	-	+33%	+41%

@@ -98,20 +98,34 @@ def compute_rankings(
     week_end_dt = pd.to_datetime(week_end)
 
     # ── Per-symbol weekly return ──────────────────────────────────────
-    week_df = df[(df["date"] >= week_start_dt) & (df["date"] <= week_end_dt)]
-    prev_df = df[df["date"] < week_start_dt]
-    sym_start = (
-        prev_df.sort_values("date")
-        .groupby("symbol")["close"]
-        .last()
-        .rename("close_start")
-    )
+    we_dt = week_end_dt
+    ws_dt = week_start_dt
+
+    # Get the last close on or before the week end
     sym_end = (
-        week_df.sort_values("date")
+        df[df["date"] <= we_dt]
+        .sort_values("date")
         .groupby("symbol")["close"]
         .last()
         .rename("close_end")
     )
+    
+    # Get the reference close (Aporia uses the 2nd to last trading day before week start, usually Wednesday)
+    def get_ref_close(g):
+        if len(g) >= 2:
+            return g.iloc[-2]
+        elif len(g) == 1:
+            return g.iloc[-1]
+        return None
+
+    sym_start = (
+        df[df["date"] < ws_dt]
+        .sort_values("date")
+        .groupby("symbol")["close"]
+        .apply(get_ref_close)
+        .rename("close_start")
+    )
+
     weekly_return = (
         ((sym_end - sym_start) / sym_start * 100)
         .rename("weekly_return")

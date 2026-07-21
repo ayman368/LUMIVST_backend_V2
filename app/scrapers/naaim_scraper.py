@@ -486,7 +486,11 @@ def _cache_page_metadata(soup: Optional[BeautifulSoup] = None, session: Optional
             r = _get_redis()
             try:
                 r.set(CACHE_KEYS["page_metadata"], json.dumps(metadata), ex=604800)  # 7 days TTL
-                logger.info("✅ Page metadata cached in Redis")
+                # Invalidate the API-level cache so the next /latest call
+                # rebuilds its response using this fresh metadata instead
+                # of serving a stale fallback-computed value.
+                r.delete(CACHE_KEYS["latest"])
+                logger.info("✅ Page metadata cached in Redis (API cache invalidated)")
             finally:
                 r.close()
 

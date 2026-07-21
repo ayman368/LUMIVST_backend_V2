@@ -58,7 +58,14 @@ def compute_sector_analytics(df: pd.DataFrame, week_start: str, week_end: str) -
             continue
             
         # 1. Weekly Return — market-cap weighted average
-        sym_start = sec_prev.sort_values("date").groupby("symbol")["close"].last()
+        def get_ref_close(g):
+            if len(g) >= 2:
+                return g.iloc[-2]
+            elif len(g) == 1:
+                return g.iloc[-1]
+            return None
+
+        sym_start = sec_prev.sort_values("date").groupby("symbol")["close"].apply(get_ref_close)
         sym_end = sec_week.sort_values("date").groupby("symbol")["close"].last()
         sym_mktcap = sec_week.sort_values("date").groupby("symbol")["market_cap"].last()
         
@@ -136,8 +143,22 @@ def compute_sector_analytics(df: pd.DataFrame, week_start: str, week_end: str) -
     for i, row in enumerate(results, 1):
         row["trend_rank"] = i
         
+    SECTOR_MAP = {
+        "Commercial & Professional Svc": "Commercial & Prof. Svc.",
+        "Consumer Durables & Apparel": "Consumer Durables",
+        "Consumer Discretionary Distribution & Retail": "Consumer Discretionary",
+        "Consumer Staples Distribution & Retail": "Consumer Staples",
+        "Pharma & Biotech & Life Science": "Pharma, Biotech & Life Sc.",
+        "Household & Personal Products": "Household & Personal Prods.",
+    }
+    
+    final_results = []
     for row in results:
         del row["score"]
+        if row["sector"] == "Unknown":
+            continue
+        row["sector"] = SECTOR_MAP.get(row["sector"], row["sector"])
+        final_results.append(row)
         
-    results.sort(key=lambda x: x["weekly_return"], reverse=True)
-    return results
+    final_results.sort(key=lambda x: x["weekly_return"], reverse=True)
+    return final_results
