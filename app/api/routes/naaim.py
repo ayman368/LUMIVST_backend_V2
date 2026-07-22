@@ -56,14 +56,13 @@ def _get_cached_page_metadata() -> dict:
     Populated by the scraper after each successful run.
     """
     import json
-    import os
+    from app.core.config import settings
     import redis as sync_redis
 
     result = {"last_quarter_avg": None, "last_quarter_label": None, "posted_on": None}
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         r = sync_redis.from_url(
-            redis_url,
+            settings.REDIS_URL,
             decode_responses=True,
             socket_timeout=REDIS_SOCKET_TIMEOUT,
         )

@@ -86,9 +86,9 @@ def _build_session() -> requests.Session:
 # ──────────────────────────────────────────────────────────────
 def _get_redis() -> sync_redis.Redis:
     """Return a synchronous Redis client with the unified timeout."""
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    from app.core.config import settings
     return sync_redis.from_url(
-        redis_url,
+        settings.REDIS_URL,
         decode_responses=True,
         socket_timeout=REDIS_SOCKET_TIMEOUT,
     )
