@@ -52,30 +52,24 @@ router = APIRouter()
 # ──────────────────────────────────────────────────────────────
 def _get_cached_page_metadata() -> dict:
     """
-    Read NAAIM page metadata from Redis.
+    Read NAAIM page metadata from the PostgreSQL database (naaim_metadata).
     Populated by the scraper after each successful run.
     """
-    import json
-    from app.core.config import settings
-    import redis as sync_redis
-
+    from app.core.database import SessionLocal
+    from app.models.naaim_exposure import NaaimMetadata
+    
     result = {"last_quarter_avg": None, "last_quarter_label": None, "posted_on": None}
+    db = SessionLocal()
     try:
-        r = sync_redis.from_url(
-            settings.REDIS_URL,
-            decode_responses=True,
-            socket_timeout=REDIS_SOCKET_TIMEOUT,
-        )
-        cached = r.get(CACHE_KEYS["page_metadata"])
-        r.close()
-
-        if cached:
-            data = json.loads(cached)
-            result["last_quarter_avg"] = data.get("last_quarter_avg")
-            result["last_quarter_label"] = data.get("last_quarter_label")
-            result["posted_on"] = data.get("posted_on")
+        record = db.query(NaaimMetadata).filter(NaaimMetadata.id == 1).first()
+        if record:
+            result["last_quarter_avg"] = record.last_quarter_avg
+            result["last_quarter_label"] = record.last_quarter_label
+            result["posted_on"] = record.posted_on
     except Exception as e:
-        logger.warning(f"⚠️ Failed to read NAAIM page metadata from Redis: {e}")
+        logger.warning(f"⚠️ Failed to read NAAIM page metadata from DB: {e}")
+    finally:
+        db.close()
 
     return result
 

@@ -3,7 +3,7 @@ NAAIM Exposure Index Model
 Stores weekly NAAIM survey data alongside S&P 500 close values.
 """
 
-from sqlalchemy import Column, Integer, Date, DateTime, Float
+from sqlalchemy import Column, Integer, Date, DateTime, Float, String
 from sqlalchemy.sql import func
 from app.core.database import Base
 
@@ -32,3 +32,14 @@ class NaaimExposure(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class NaaimMetadata(Base):
+    """Stores the latest scraped metadata for the NAAIM page."""
+    __tablename__ = "naaim_metadata"
+
+    id = Column(Integer, primary_key=True, index=True)
+    last_quarter_avg = Column(Float, nullable=True)
+    last_quarter_label = Column(String(50), nullable=True)
+    posted_on = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

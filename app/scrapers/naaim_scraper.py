@@ -483,16 +483,38 @@ def _cache_page_metadata(soup: Optional[BeautifulSoup] = None, session: Optional
             metadata["last_quarter_label"] = q_match.group(1)
 
         if metadata:
-            r = _get_redis()
+            from app.core.database import SessionLocal
+            from app.models.naaim_exposure import NaaimMetadata
+            
+            db = SessionLocal()
             try:
-                r.set(CACHE_KEYS["page_metadata"], json.dumps(metadata), ex=604800)  # 7 days TTL
-                # Invalidate the API-level cache so the next /latest call
-                # rebuilds its response using this fresh metadata instead
-                # of serving a stale fallback-computed value.
-                r.delete(CACHE_KEYS["latest"])
-                logger.info("✅ Page metadata cached in Redis (API cache invalidated)")
+                record = db.query(NaaimMetadata).filter(NaaimMetadata.id == 1).first()
+                if not record:
+                    record = NaaimMetadata(id=1)
+                    db.add(record)
+                
+                if "last_quarter_avg" in metadata:
+                    record.last_quarter_avg = metadata["last_quarter_avg"]
+                if "last_quarter_label" in metadata:
+                    record.last_quarter_label = metadata["last_quarter_label"]
+                if "posted_on" in metadata:
+                    record.posted_on = metadata["posted_on"]
+                
+                db.commit()
+                logger.info("✅ Page metadata saved to PostgreSQL DB (naaim_metadata)")
+                
+                # Still invalidate the Redis API cache so the frontend fetches fresh data
+                r = _get_redis()
+                try:
+                    r.delete(CACHE_KEYS["latest"])
+                    logger.info("✅ API cache invalidated in Redis")
+                finally:
+                    r.close()
+            except Exception as db_err:
+                db.rollback()
+                logger.error(f"⚠️ Failed to save metadata to DB: {db_err}")
             finally:
-                r.close()
+                db.close()
 
     except Exception as e:
         logger.warning(f"⚠️ Failed to cache page metadata: {e}")
